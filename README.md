@@ -1,5 +1,6 @@
 Usage on any Codelitt repository
 
+```
 name: Security Check
 
 on:
@@ -11,3 +12,4 @@ on:
 jobs:
   security-scan:
     uses: codelittinc/security-actions/.github/workflows/security.yml@main
+```
