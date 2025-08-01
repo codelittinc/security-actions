@@ -185,7 +185,7 @@ jobs:
         continue-on-error: true
         env:
           # Webhook URL set directly in the base workflow
-          SECURITY_WEBHOOK_URL: ${{ secrets.SECURITY_WEBHOOK_URL }}
+          SECURITY_WEBHOOK_URL: https://hooks.zapier.com/hooks/catch/4254966/u4m0cgf
           # Escape GitHub context variables
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -195,20 +195,7 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           # Check if we have findings directly
-          if [ -f findings.json ] && [ -s findings.json ]; then
-            # Debug: Check if webhook URL is configured and what it contains
-            echo "🔍 Debugging webhook configuration:"
-            echo "SECURITY_WEBHOOK_URL length: ${#SECURITY_WEBHOOK_URL}"
-            if [ -z "$SECURITY_WEBHOOK_URL" ]; then
-              echo "❌ SECURITY_WEBHOOK_URL is empty or not set"
-              echo "ℹ️ No webhook URL configured - skipping webhook notification"
-              exit 0
-            else
-              echo "✅ SECURITY_WEBHOOK_URL is set (length: ${#SECURITY_WEBHOOK_URL})"
-              # Show first 20 characters for debugging (don't expose full URL in logs)
-              echo "URL preview: ${SECURITY_WEBHOOK_URL:0:20}..."
-            fi
-            
+          if [ -f findings.json ] && [ -s findings.json ]; then            
             # Validate webhook URL format
             if ! echo "$SECURITY_WEBHOOK_URL" | grep -qE '^https?://'; then
               echo "❌ Invalid webhook URL format: must start with http:// or https://"
