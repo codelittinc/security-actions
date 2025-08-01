@@ -196,7 +196,32 @@ jobs:
         run: |
           # Check if we have findings directly
           if [ -f findings.json ] && [ -s findings.json ]; then
+            # Debug: Check if webhook URL is configured and what it contains
+            echo "🔍 Debugging webhook configuration:"
+            echo "SECURITY_WEBHOOK_URL length: ${#SECURITY_WEBHOOK_URL}"
+            if [ -z "$SECURITY_WEBHOOK_URL" ]; then
+              echo "❌ SECURITY_WEBHOOK_URL is empty or not set"
+              echo "ℹ️ No webhook URL configured - skipping webhook notification"
+              exit 0
+            else
+              echo "✅ SECURITY_WEBHOOK_URL is set (length: ${#SECURITY_WEBHOOK_URL})"
+              # Show first 20 characters for debugging (don't expose full URL in logs)
+              echo "URL preview: ${SECURITY_WEBHOOK_URL:0:20}..."
+            fi
+            
+            # Validate webhook URL format
+            if ! echo "$SECURITY_WEBHOOK_URL" | grep -qE '^https?://'; then
+              echo "❌ Invalid webhook URL format: must start with http:// or https://"
+              echo "ℹ️ Skipping webhook notification due to invalid URL format"
+              exit 0
+            fi
+            
             echo "📡 Sending security alert to webhook..."
+            # Validate webhook URL format
+            if ! echo "$SECURITY_WEBHOOK_URL" | grep -qE '^https?://'; then
+              echo "❌ Invalid webhook URL format: must start with http:// or https://"
+              exit 0
+            fi
             
             TOTAL_COUNT=$(wc -l < findings.json)
             
@@ -227,11 +252,14 @@ jobs:
               }' > webhook_payload.json
             
             # Send to webhook with improved error handling and security headers
+            echo "🌐 Attempting webhook request..."
+            echo "URL length: ${#SECURITY_WEBHOOK_URL}"
+            
             if curl -X POST \
               -H "Content-Type: application/json" \
               -H "User-Agent: GitHub-Actions-Security-Scanner/1.0" \
               -d @webhook_payload.json \
-              "$(printf %q "$SECURITY_WEBHOOK_URL")" \
+              "$SECURITY_WEBHOOK_URL" \
               --max-time 30 \
               --retry 2 \
               --retry-delay 5 \
@@ -241,6 +269,8 @@ jobs:
               echo "✅ Security alert sent successfully"
             else
               echo "❌ Failed to send security alert to webhook"
+              echo "🔍 Curl exit code: $?"
+              echo "🔍 Please verify the webhook URL is correct and accessible"
             fi
             
             # Clean up sensitive payload file
