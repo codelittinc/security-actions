@@ -1,8 +1,11 @@
-name: Security - Secret Scanning
+name: Reusable Security Scan
 
 on:
-  push:
-    branches: ['**']
+  workflow_call:
+    secrets:
+      SECURITY_WEBHOOK_URL:
+        description: 'Webhook URL for security alerts'
+        required: false
 
 # Minimal permissions for security
 permissions:
