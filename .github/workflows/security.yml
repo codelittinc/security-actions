@@ -261,7 +261,7 @@ jobs:
             fi
             
             # Clean up sensitive payload file
-            rm -f webhook_payload.json sanitized_findings.json
+            rm -f webhook_payload.json sanitized_findings.json findings.json
           else
             echo "No secrets detected - skipping webhook notification"
           fi
@@ -270,7 +270,7 @@ jobs:
         if: always()
         run: |
           # Check if we have findings directly
-          if [ -f findings.json ] && [ -s findings.json ]; then
+          if [ "$(printf %q "$SECRET_SCAN_RESULT")" == "failure" ]; then
             echo "🚨 FAILING BUILD DUE TO DETECTED SECRETS 🚨"
             exit 1
           else
