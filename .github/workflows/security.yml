@@ -2,10 +2,6 @@ name: Reusable Security Scan
 
 on:
   workflow_call:
-    secrets:
-      SECURITY_WEBHOOK_URL:
-        description: 'Webhook URL for security alerts'
-        required: false
 
 # Minimal permissions for security
 permissions:
@@ -188,7 +184,7 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          # Move webhook URL to environment variable/secret for better security
+          # Webhook URL set directly in the base workflow
           SECURITY_WEBHOOK_URL: ${{ secrets.SECURITY_WEBHOOK_URL }}
           # Escape GitHub context variables
           GITHUB_REPOSITORY: ${{ github.repository }}
