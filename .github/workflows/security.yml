@@ -180,12 +180,20 @@ jobs:
           echo ""
           exit 1
 
+      - name: Debug Webhook URL
+        if: always()
+        env:
+          # Webhook URL from organization secrets
+          SECURITY_WEBHOOK_URL: ${{ secrets.SECURITY_WEBHOOK_URL }}
+        run: |
+          echo "🔍 Webhook URL configured: $SECURITY_WEBHOOK_URL"
+
       - name: Send Security Alert to Webhook
         if: always()
         continue-on-error: true
         env:
-          # Webhook URL set directly in the base workflow
-          SECURITY_WEBHOOK_URL: https://hooks.zapier.com/hooks/catch/4254966/u4m0cgf
+          # Webhook URL from organization secrets
+          SECURITY_WEBHOOK_URL: ${{ secrets.SECURITY_WEBHOOK_URL }}
           # Escape GitHub context variables
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
