@@ -3,6 +3,7 @@
 Details about script:
 
 1. It does not find keys if they are submited in the first commit of the repository
+2. In some cases, it throws a false positive, but it still notifies us in Slack
 
 Usage on any Codelitt repository
 
