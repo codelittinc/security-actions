@@ -92,14 +92,12 @@ jobs:
             echo "🌿 Branch: $(printf %q "$CURRENT_BRANCH")"
             echo ""
 
-            # Show commit count only (not actual commit messages to avoid logging sensitive data)
+            # Show commits to be scanned
             echo "📝 Commits to be scanned:"
             if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-              COMMIT_COUNT=$(git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" | wc -l)
-              printf "Found %d commit(s) to scan\n" "$COMMIT_COUNT"
+              git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" || echo "No commits found in range"
             else
-              COMMIT_COUNT=$(git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" | wc -l)
-              printf "Found %d commit(s) to scan\n" "$COMMIT_COUNT"
+              git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" || echo "No commits found in range"
             fi
             echo ""
 
