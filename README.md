@@ -5,9 +5,8 @@ name: Security Check
 
 on:
   push:
-    branches: ["**"]
+    branches: ['**']
   pull_request:
-    branches: [main, develop, master]
 
 jobs:
   security-scan:
