@@ -34,7 +34,6 @@ jobs:
           # Validate webhook URL format
           if ! echo "$WEBHOOK_URL" | grep -qE '^https?://'; then
             echo "❌ ERROR: Invalid webhook URL format - must start with http:// or https://"
-            echo "Provided URL: $WEBHOOK_URL"
             exit 1
           fi
 
@@ -93,12 +92,14 @@ jobs:
             echo "🌿 Branch: $(printf %q "$CURRENT_BRANCH")"
             echo ""
 
-            # Show commits to be scanned
+            # Show commit count only (not actual commit messages to avoid logging sensitive data)
             echo "📝 Commits to be scanned:"
             if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-              git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" || echo "No commits found in range"
+              COMMIT_COUNT=$(git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" | wc -l)
+              printf "Found %d commit(s) to scan\n" "$COMMIT_COUNT"
             else
-              git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" || echo "No commits found in range"
+              COMMIT_COUNT=$(git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" | wc -l)
+              printf "Found %d commit(s) to scan\n" "$COMMIT_COUNT"
             fi
             echo ""
 
@@ -213,14 +214,20 @@ jobs:
         if: always()
         run: |
           # Filter out log messages, keep only actual findings (lines with SourceMetadata)
-          grep '"SourceMetadata"' trufflehog_output.json > findings.json 2>/dev/null || touch findings.json
-
-          if [ -s findings.json ]; then
+          # Use grep with -q to avoid logging the actual content
+          if grep -q '"SourceMetadata"' trufflehog_output.json 2>/dev/null; then
+            # Create findings file but don't log the content
+            grep '"SourceMetadata"' trufflehog_output.json > findings.json 2>/dev/null || touch findings.json
             TOTAL_COUNT=$(wc -l < findings.json)
             printf "Found %d secret findings\n" "$TOTAL_COUNT"
+            echo "⚠️  SECRETS DETECTED - Check the workflow output for details"
           else
             echo "No secret findings detected"
+            touch findings.json
           fi
+          
+          # Clean up the raw output file immediately to prevent accidental logging
+          rm -f trufflehog_output.json
 
       - name: Security Alert
         if: always()
@@ -278,7 +285,7 @@ jobs:
             fi
             
             echo "📡 Sending security alert to webhook..."
-            # Validate webhook URL format
+            # Validate webhook URL format (already validated above, but double-check)
             if ! echo "$SECURITY_WEBHOOK_URL" | grep -qE '^https?://'; then
               echo "❌ Invalid webhook URL format: must start with http:// or https://"
               exit 0
@@ -314,7 +321,6 @@ jobs:
             
             # Send to webhook with improved error handling and security headers
             echo "🌐 Attempting webhook request..."
-            echo "URL length: ${#SECURITY_WEBHOOK_URL}"
             
             if curl -X POST \
               -H "Content-Type: application/json" \
@@ -338,6 +344,8 @@ jobs:
             rm -f webhook_payload.json sanitized_findings.json findings.json
           else
             echo "No secrets detected - skipping webhook notification"
+            # Clean up any remaining files even if no secrets found
+            rm -f findings.json 2>/dev/null || true
           fi
 
       - name: Fail Build After Notification
@@ -363,16 +371,17 @@ jobs:
 
           printf "📊 Final verification scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
 
-          # Check if we have findings
+          # Check if we have findings (without logging the actual content)
           if [ -s final_verification.json ]; then
             # Filter out log messages, keep only actual findings
-            grep '"SourceMetadata"' final_verification.json > final_findings.json 2>/dev/null || touch final_findings.json
-            
-            if [ -s final_findings.json ]; then
+            if grep -q '"SourceMetadata"' final_verification.json 2>/dev/null; then
+              grep '"SourceMetadata"' final_verification.json > final_findings.json 2>/dev/null || touch final_findings.json
               TOTAL_COUNT=$(wc -l < final_findings.json)
               echo "🚨 FINAL VERIFICATION: SECRETS DETECTED 🚨"
               printf "TruffleHog found %d potential credential(s) in final verification.\n" "$TOTAL_COUNT"
               echo "🚨 FAILING BUILD DUE TO DETECTED SECRETS 🚨"
+              # Clean up sensitive files before exiting
+              rm -f final_verification.json final_findings.json 2>/dev/null || true
               exit 1
             fi
           fi
@@ -380,6 +389,9 @@ jobs:
           echo "✅ Final verification: No secrets detected - build can proceed"
           # Clean up verification files
           rm -f final_verification.json final_findings.json 2>/dev/null || true
+          
+          # Final cleanup of any remaining sensitive files
+          rm -f trufflehog_output.json findings.json sanitized_findings.json webhook_payload.json 2>/dev/null || true
 
   security-gate:
     name: Security Gate
