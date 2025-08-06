@@ -1,10 +1,3 @@
-# Readme
-
-Details about script:
-
-1. It does not find keys if they are submited in the first commit of the repository
-2. In some cases, it throws a false positive, but it still notifies us in Slack
-
 Usage on any Codelitt repository
 
 ```
@@ -12,11 +5,16 @@ name: Security Check
 
 on:
   push:
-    branches: ['**']
+    branches: ["**"]
   pull_request:
     branches: [main, develop, master]
 
 jobs:
   security-scan:
     uses: codelittinc/security-actions/.github/workflows/security.yml@main
+    secrets:
+      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
 ```
+
+Notice that the SECURITY_WEBHOOK_URL will be defined in the organization level. You can assume it will be available for your project.
+If you need a specific URL, you can set it on your repository
