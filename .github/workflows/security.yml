@@ -55,6 +55,77 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup TruffleHog Scan Function
+        run: |
+          # Create a reusable function for TruffleHog scanning
+          cat > /tmp/trufflehog_scan.sh << 'EOF'
+          #!/bin/bash
+
+          # Function to determine scan range
+          get_scan_range() {
+            local DEFAULT_BRANCH="$1"
+            local CURRENT_BRANCH="$2"
+            local BEFORE_COMMIT="$3"
+
+            if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
+              # On default branch - scan only the pushed commits
+              if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
+                echo "HEAD~1"
+              else
+                echo "$BEFORE_COMMIT"
+              fi
+            else
+              # On feature branch - scan all commits not in default branch
+              echo "origin/$DEFAULT_BRANCH"
+            fi
+          }
+
+          # Function to run TruffleHog scan
+          run_trufflehog_scan() {
+            local OUTPUT_FILE="$1"
+            local SINCE_COMMIT="$2"
+            local CURRENT_BRANCH="$3"
+            local CURRENT_COMMIT="$4"
+
+            echo "🔍 Running TruffleHog scan..."
+            echo "📋 Scanning from: $(printf %q "$SINCE_COMMIT")"
+            echo "📋 Scanning to: $(printf %q "$CURRENT_COMMIT")"
+            echo "🌿 Branch: $(printf %q "$CURRENT_BRANCH")"
+            echo ""
+
+            # Show commits to be scanned
+            echo "📝 Commits to be scanned:"
+            if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
+              git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" || echo "No commits found in range"
+            else
+              git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" || echo "No commits found in range"
+            fi
+            echo ""
+
+            # Run TruffleHog
+            set +e  # Don't exit on error, we want to capture the exit code
+
+            trufflehog git file://. \
+              --since-commit="$(printf %q "$SINCE_COMMIT")" \
+              --branch="HEAD" \
+              --no-verification \
+              --force-skip-binaries \
+              --force-skip-archives \
+              --no-update \
+              --json \
+              --log-level=2 \
+              > "$OUTPUT_FILE" 2>&1
+
+            local TRUFFLEHOG_EXIT_CODE=$?
+            set -e  # Re-enable exit on error
+
+            printf "📊 TruffleHog scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
+            return $TRUFFLEHOG_EXIT_CODE
+          }
+          EOF
+
+          chmod +x /tmp/trufflehog_scan.sh
+
       - name: Install TruffleHog (Secure)
         continue-on-error: true
         run: |
@@ -107,63 +178,33 @@ jobs:
       - name: Run TruffleHog Scan
         continue-on-error: true
         run: |
+          # Source the reusable functions
+          source /tmp/trufflehog_scan.sh
+          
           # Get the default branch and current commit with proper escaping
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           CURRENT_COMMIT="${{ github.sha }}"
           CURRENT_BRANCH="${{ github.ref_name }}"
+          BEFORE_COMMIT="${{ github.event.before }}"
 
-          # Check if we're on the default branch
+          # Determine scan range using the reusable function
+          SINCE_COMMIT=$(get_scan_range "$DEFAULT_BRANCH" "$CURRENT_BRANCH" "$BEFORE_COMMIT")
+          
+          # Show scan context
           if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-            # On default branch - scan only the pushed commits
-            BEFORE_COMMIT="${{ github.event.before }}"
             if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
-              SINCE_COMMIT="HEAD~1"
               echo "🔍 First commit on default branch"
-              printf "📋 Scanning from: %s\n" "$(printf %q "$SINCE_COMMIT")"
             else
-              SINCE_COMMIT="$BEFORE_COMMIT"
               printf "🔍 Push to default branch (%s)\n" "$(printf %q "$DEFAULT_BRANCH")"
-              printf "📋 Scanning from: %s\n" "$(printf %q "$BEFORE_COMMIT")"
             fi
-            printf "📋 Scanning to: %s\n" "$(printf %q "$CURRENT_COMMIT")"
           else
-            # On feature branch - scan all commits not in default branch
-            SINCE_COMMIT="origin/$DEFAULT_BRANCH"
             echo "🔍 Feature branch detected"
             printf "📋 Scanning all commits in '%s' not in '%s'\n" "$(printf %q "$CURRENT_BRANCH")" "$(printf %q "$DEFAULT_BRANCH")"
-            printf "📋 Scanning from: %s\n" "$(printf %q "$SINCE_COMMIT")"
-            printf "📋 Scanning to: %s\n" "$(printf %q "$CURRENT_COMMIT")"
           fi
 
-          printf "🌿 Branch: %s\n" "$(printf %q "$CURRENT_BRANCH")"
-          echo ""
-          echo "📝 Commits to be scanned:"
-          if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-            git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" || echo "No commits found in range"
-          else
-            git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" || echo "No commits found in range"
-          fi
-          echo ""
-
-          # Run TruffleHog with improved error handling and logging
-          echo "🔍 Running TruffleHog..."
-          set +e  # Don't exit on error, we want to capture the exit code
-
-          trufflehog git file://. \
-            --since-commit="$(printf %q "$SINCE_COMMIT")" \
-            --branch="HEAD" \
-            --no-verification \
-            --force-skip-binaries \
-            --force-skip-archives \
-            --no-update \
-            --json \
-            --log-level=2 \
-            > trufflehog_output.json 2>&1
-
+          # Run TruffleHog scan using the reusable function
+          run_trufflehog_scan "trufflehog_output.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT"
           TRUFFLEHOG_EXIT_CODE=$?
-          set -e  # Re-enable exit on error
-
-          printf "📊 TruffleHog scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
 
           # Exit with the same code TruffleHog used
           exit $TRUFFLEHOG_EXIT_CODE
@@ -302,43 +343,23 @@ jobs:
       - name: Fail Build After Notification
         if: always()
         run: |
+          # Source the reusable functions
+          source /tmp/trufflehog_scan.sh
+          
           # Get the default branch and current commit with proper escaping
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           CURRENT_COMMIT="${{ github.sha }}"
           CURRENT_BRANCH="${{ github.ref_name }}"
+          BEFORE_COMMIT="${{ github.event.before }}"
 
-          # Check if we're on the default branch
-          if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-            # On default branch - scan only the pushed commits
-            BEFORE_COMMIT="${{ github.event.before }}"
-            if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
-              SINCE_COMMIT="HEAD~1"
-            else
-              SINCE_COMMIT="$BEFORE_COMMIT"
-            fi
-          else
-            # On feature branch - scan all commits not in default branch
-            SINCE_COMMIT="origin/$DEFAULT_BRANCH"
-          fi
+          # Determine scan range using the reusable function
+          SINCE_COMMIT=$(get_scan_range "$DEFAULT_BRANCH" "$CURRENT_BRANCH" "$BEFORE_COMMIT")
 
           echo "🔍 Running final TruffleHog verification scan..."
           
-          # Run TruffleHog for final verification
-          set +e  # Don't exit on error, we want to capture the exit code
-          
-          trufflehog git file://. \
-            --since-commit="$(printf %q "$SINCE_COMMIT")" \
-            --branch="HEAD" \
-            --no-verification \
-            --force-skip-binaries \
-            --force-skip-archives \
-            --no-update \
-            --json \
-            --log-level=2 \
-            > final_verification.json 2>&1
-
+          # Run TruffleHog for final verification using the reusable function
+          run_trufflehog_scan "final_verification.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT"
           TRUFFLEHOG_EXIT_CODE=$?
-          set -e  # Re-enable exit on error
 
           printf "📊 Final verification scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
 
