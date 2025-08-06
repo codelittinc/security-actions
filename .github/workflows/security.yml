@@ -2,11 +2,10 @@ name: Reusable Security Scan
 
 on:
   workflow_call:
-    inputs:
+    secrets:
       webhook_url:
         description: "Webhook URL for security alerts"
         required: true
-        type: string
 
 # Minimal permissions for security
 permissions:
@@ -24,7 +23,7 @@ jobs:
     steps:
       - name: Validate Webhook URL
         run: |
-          WEBHOOK_URL="${{ inputs.webhook_url }}"
+          WEBHOOK_URL="${{ secrets.webhook_url }}"
 
           if [ -z "$WEBHOOK_URL" ]; then
             echo "❌ ERROR: webhook_url input is required but not provided"
@@ -218,8 +217,8 @@ jobs:
       - name: Debug Webhook URL
         if: always()
         env:
-          # Webhook URL from workflow input
-          SECURITY_WEBHOOK_URL: ${{ inputs.webhook_url }}
+          # Webhook URL from workflow secret
+          SECURITY_WEBHOOK_URL: ${{ secrets.webhook_url }}
         run: |
           echo "🔍 Webhook URL configured: ${SECURITY_WEBHOOK_URL:0:50}..." # Show first 50 chars for security
 
@@ -227,8 +226,8 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          # Webhook URL from workflow input
-          SECURITY_WEBHOOK_URL: ${{ inputs.webhook_url }}
+          # Webhook URL from workflow secret
+          SECURITY_WEBHOOK_URL: ${{ secrets.webhook_url }}
           # Escape GitHub context variables
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
