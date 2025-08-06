@@ -302,13 +302,63 @@ jobs:
       - name: Fail Build After Notification
         if: always()
         run: |
-          # Check if we have findings directly
-          if [ "$(printf %q "$SECRET_SCAN_RESULT")" == "failure" ]; then
-            echo "🚨 FAILING BUILD DUE TO DETECTED SECRETS 🚨"
-            exit 1
+          # Get the default branch and current commit with proper escaping
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          CURRENT_COMMIT="${{ github.sha }}"
+          CURRENT_BRANCH="${{ github.ref_name }}"
+
+          # Check if we're on the default branch
+          if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
+            # On default branch - scan only the pushed commits
+            BEFORE_COMMIT="${{ github.event.before }}"
+            if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
+              SINCE_COMMIT="HEAD~1"
+            else
+              SINCE_COMMIT="$BEFORE_COMMIT"
+            fi
           else
-            echo "✅ No secrets detected - build can proceed"
+            # On feature branch - scan all commits not in default branch
+            SINCE_COMMIT="origin/$DEFAULT_BRANCH"
           fi
+
+          echo "🔍 Running final TruffleHog verification scan..."
+          
+          # Run TruffleHog for final verification
+          set +e  # Don't exit on error, we want to capture the exit code
+          
+          trufflehog git file://. \
+            --since-commit="$(printf %q "$SINCE_COMMIT")" \
+            --branch="HEAD" \
+            --no-verification \
+            --force-skip-binaries \
+            --force-skip-archives \
+            --no-update \
+            --json \
+            --log-level=2 \
+            > final_verification.json 2>&1
+
+          TRUFFLEHOG_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
+
+          printf "📊 Final verification scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
+
+          # Check if we have findings
+          if [ -s final_verification.json ]; then
+            # Filter out log messages, keep only actual findings
+            grep '"SourceMetadata"' final_verification.json > final_findings.json 2>/dev/null || touch final_findings.json
+            
+            if [ -s final_findings.json ]; then
+              TOTAL_COUNT=$(wc -l < final_findings.json)
+              echo "🚨 FINAL VERIFICATION: SECRETS DETECTED 🚨"
+              printf "TruffleHog found %d potential credential(s) in final verification.\n" "$TOTAL_COUNT"
+              echo "🚨 FAILING BUILD DUE TO DETECTED SECRETS 🚨"
+              exit 1
+            fi
+          fi
+
+          echo "✅ Final verification: No secrets detected - build can proceed"
+          # Clean up verification files
+          rm -f final_verification.json final_findings.json 2>/dev/null || true
 
   security-gate:
     name: Security Gate
