@@ -39,7 +39,6 @@ jobs:
           fi
 
           echo "✅ Webhook URL validation passed"
-          echo "Webhook URL configured: ${WEBHOOK_URL:0:50}..." # Show first 50 chars for security
 
   secret-scan:
     name: TruffleHog Secret Scan
@@ -213,14 +212,6 @@ jobs:
           fi
           echo ""
           exit 1
-
-      - name: Debug Webhook URL
-        if: always()
-        env:
-          # Webhook URL from workflow secret
-          SECURITY_WEBHOOK_URL: ${{ secrets.webhook_url }}
-        run: |
-          echo "🔍 Webhook URL configured: ${SECURITY_WEBHOOK_URL:0:50}..." # Show first 50 chars for security
 
       - name: Send Security Alert to Webhook
         if: always()
