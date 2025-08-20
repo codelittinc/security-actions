@@ -1,0 +1,18 @@
+name: Security Scan
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  security:
+    uses: codelittinc/security-actions/.github/workflows/node-security-dependency-scan.yml@main
+    with:
+      project_name: "my-awesome-nodejs-app"
+      node_version: "18"
+      fail_on_cvss: "7"
+      enable_retired: true
+      audit_level: "moderate"
+      continue_on_error: false
