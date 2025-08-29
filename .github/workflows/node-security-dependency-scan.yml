@@ -207,59 +207,6 @@ jobs:
           path: reports/
           retention-days: 30
 
-      - name: Comment PR with security findings
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-
-            // Check if npm audit found vulnerabilities
-            try {
-              const auditResult = await $exec('npm audit --json --audit-level=${{ inputs.audit_level }}');
-              const auditData = JSON.parse(auditResult.stdout);
-              
-              if (auditData.vulnerabilities && Object.keys(auditData.vulnerabilities).length > 0) {
-                let comment = '## 🔒 Node.js Security Scan Results\n\n';
-                comment += '⚠️ **Vulnerabilities found in dependencies:**\n\n';
-                
-                for (const [pkg, vuln] of Object.entries(auditData.vulnerabilities)) {
-                  comment += `- **${pkg}**: ${vuln.title} (Severity: ${vuln.severity})\n`;
-                  comment += `  - Fixed in: ${vuln.fixedIn || 'Not available'}\n`;
-                  comment += `  - More info: ${vuln.url}\n\n`;
-                }
-                
-                comment += 'Please review and update vulnerable dependencies.';
-                
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: comment
-                });
-              } else {
-                let comment = '## 🔒 Node.js Security Scan Results\n\n✅ **No vulnerabilities found at the configured audit level.**\n\n';
-                
-                // Add information about allowed outdated libraries if configured
-                const allowedLibs = '${{ inputs.allowed_outdated_libraries }}';
-                if (allowedLibs && allowedLibs.trim() !== '') {
-                  comment += `📋 **Libraries allowed to be outdated:** ${allowedLibs}\n\n`;
-                }
-                
-                comment += 'Note: High severity vulnerabilities will always fail the build regardless of the audit level setting.';
-                
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: comment
-                });
-              }
-            } catch (error) {
-              console.log('Error processing npm audit results:', error);
-            }
-
       - name: Security Gate Check
         if: ${{ !inputs.continue_on_error }}
         run: |
