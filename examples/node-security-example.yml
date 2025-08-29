@@ -1,4 +1,4 @@
-name: Security Scan Example
+name: Node.js Security Scan Example
 
 on:
   push:
@@ -8,10 +8,12 @@ on:
 
 jobs:
   security-scan:
-    uses: ./.github/workflows/security.yml
+    uses: ./.github/workflows/node-security-dependency-scan.yml
     with:
-      show_keys: false # Set to true if you want to see the actual keys in logs
-      notify_webhook: true
-      ignore_keys: "AWS_ACCESS_KEY_ID,API_KEY,ACCESS_TOKEN" # Comma-separated list of keys to ignore
-    secrets:
-      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
+      project_name: "my-node-project"
+      node_version: "18"
+      fail_on_cvss: "7"
+      enable_retired: true
+      audit_level: "moderate"
+      continue_on_error: false
+      allowed_outdated_libraries: "@hapi/address,react-router-dom,tabbable"
