@@ -2,6 +2,17 @@ name: Reusable Security Scan
 
 on:
   workflow_call:
+    inputs:
+      show_keys:
+        description: "Whether to show the keys found by TruffleHog in the output"
+        required: false
+        default: false
+        type: boolean
+      notify_webhook:
+        description: "Whether to send webhook notifications for security alerts"
+        required: false
+        default: true
+        type: boolean
     secrets:
       webhook_url:
         description: "Webhook URL for security alerts"
@@ -179,7 +190,7 @@ jobs:
         run: |
           # Source the reusable functions
           source /tmp/trufflehog_scan.sh
-          
+
           # Get the default branch and current commit with proper escaping
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           CURRENT_COMMIT="${{ github.sha }}"
@@ -188,7 +199,7 @@ jobs:
 
           # Determine scan range using the reusable function
           SINCE_COMMIT=$(get_scan_range "$DEFAULT_BRANCH" "$CURRENT_BRANCH" "$BEFORE_COMMIT")
-          
+
           # Show scan context
           if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
             if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
@@ -219,11 +230,22 @@ jobs:
             TOTAL_COUNT=$(wc -l < findings.json)
             printf "Found %d secret findings\n" "$TOTAL_COUNT"
             echo "⚠️  SECRETS DETECTED - Check the workflow output for details"
+            
+            # Conditionally show keys based on show_keys input
+            if [ "${{ inputs.show_keys }}" == "true" ]; then
+              echo ""
+              echo "🔑 Keys found by TruffleHog:"
+              echo "================================"
+              cat findings.json | jq -r '.DetectorName + ": " + .Raw' 2>/dev/null || echo "Could not parse findings for display"
+              echo "================================"
+            else
+              echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
+            fi
           else
             echo "No secret findings detected"
             touch findings.json
           fi
-          
+
           # Clean up the raw output file immediately to prevent accidental logging
           rm -f trufflehog_output.json
 
@@ -252,6 +274,17 @@ jobs:
             echo "   • Commit hashes (look for 'commit': fields)"
             echo "   • Secret types (look for 'DetectorName': fields)"
             echo ""
+            # Conditionally show keys based on show_keys input
+            if [ "${{ inputs.show_keys }}" == "true" ]; then
+              echo ""
+              echo "🔑 Keys found by TruffleHog:"
+              echo "================================"
+              cat findings.json | jq -r '.DetectorName + ": " + .Raw' 2>/dev/null || echo "Could not parse findings for display"
+              echo "================================"
+            else
+              echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
+            fi
+            echo ""
             echo "⚠️  Once committed to Git, consider these credentials compromised!"
           else
             echo "✅ No secrets detected"
@@ -260,7 +293,7 @@ jobs:
           exit 1
 
       - name: Send Security Alert to Webhook
-        if: always()
+        if: always() && inputs.notify_webhook == 'true'
         continue-on-error: true
         env:
           # Webhook URL from workflow secret
@@ -346,12 +379,19 @@ jobs:
             rm -f findings.json 2>/dev/null || true
           fi
 
+      - name: Handle Webhook Disabled
+        if: always() && inputs.notify_webhook != 'true'
+        run: |
+          echo "ℹ️  Webhook notifications are disabled. Set notify_webhook: true to enable them."
+          # Clean up any remaining files even if no secrets found
+          rm -f findings.json 2>/dev/null || true
+
       - name: Fail Build After Notification
         if: always()
         run: |
           # Source the reusable functions
           source /tmp/trufflehog_scan.sh
-          
+
           # Get the default branch and current commit with proper escaping
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           CURRENT_COMMIT="${{ github.sha }}"
@@ -362,7 +402,7 @@ jobs:
           SINCE_COMMIT=$(get_scan_range "$DEFAULT_BRANCH" "$CURRENT_BRANCH" "$BEFORE_COMMIT")
 
           echo "🔍 Running final TruffleHog verification scan..."
-          
+
           # Run TruffleHog for final verification using the reusable function
           run_trufflehog_scan "final_verification.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT"
           TRUFFLEHOG_EXIT_CODE=$?
@@ -387,7 +427,7 @@ jobs:
           echo "✅ Final verification: No secrets detected - build can proceed"
           # Clean up verification files
           rm -f final_verification.json final_findings.json 2>/dev/null || true
-          
+
           # Final cleanup of any remaining sensitive files
           rm -f trufflehog_output.json findings.json sanitized_findings.json webhook_payload.json 2>/dev/null || true
 

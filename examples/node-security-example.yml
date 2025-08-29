@@ -1,30 +1,42 @@
-name: Example: Node.js Security Scan with Allowed Outdated Libraries
+name: Security Scan Example
 
 on:
-  pull_request:
-    branches: [ main, develop ]
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
 
 jobs:
   security-scan:
-    uses: ./.github/workflows/node-security-dependency-scan.yml
+    uses: ./.github/workflows/security.yml
     with:
-      project_name: "my-node-project"
-      node_version: "18"
-      fail_on_cvss: "7"
-      enable_retired: true
-      audit_level: "moderate"
-      continue_on_error: false
-      # Define libraries that are okay to be outdated
-      # This can be useful for:
-      # - Development tools that don't affect production security
-      # - Libraries that are intentionally kept at older versions for compatibility
-      # - Libraries that are being gradually migrated
-      allowed_outdated_libraries: "typescript,eslint,prettier,jest"
-    
-    # Optional: Add additional permissions if needed
-    permissions:
-      contents: read
-      pull-requests: write
-      security-events: write  # If you want to upload security findings to GitHub Security tab
+      # Show the actual keys/secrets found by TruffleHog
+      show_keys: true
+      # Enable webhook notifications for security alerts
+      notify_webhook: true
+    secrets:
+      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
+# Example with different configurations:
+#
+# jobs:
+#   security-scan:
+#     uses: ./.github/workflows/security.yml
+#     with:
+#       # Hide the actual keys/secrets (default behavior)
+#       show_keys: false
+#       # Disable webhook notifications
+#       notify_webhook: false
+#     secrets:
+#       webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
+#
+# Available inputs:
+# - show_keys: boolean (default: false)
+#   - true: Display the actual keys/secrets found by TruffleHog
+#   - false: Hide the actual keys/secrets (recommended for security)
+#
+# - notify_webhook: boolean (default: true)
+#   - true: Send webhook notifications for security alerts
+#   - false: Skip webhook notifications (useful for testing or when webhook is not needed)
+#
+# Required secrets:
+# - webhook_url: The webhook URL where security alerts will be sent
