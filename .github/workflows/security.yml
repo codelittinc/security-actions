@@ -313,8 +313,10 @@ jobs:
             if [ "${{ inputs.show_keys }}" == "true" ]; then
               echo ""
               echo "🔑 Keys found by TruffleHog:"
+              echo "Format: Commit: <commit-hash> | <detector-name>: <secret-value>"
               echo "================================"
-              cat findings.json | jq -r '.DetectorName + ": " + .Raw' 2>/dev/null || echo "Could not parse findings for display"
+              # Display keys with commit hash information
+              cat findings.json | jq -r 'if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then "Commit: " + .SourceMetadata.Git.Commit + " | " + .DetectorName + ": " + .Raw else .DetectorName + ": " + .Raw end' 2>/dev/null || echo "Could not parse findings for display"
               echo "================================"
             else
               echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
@@ -347,17 +349,19 @@ jobs:
             echo "4. 🔍 Look for 'file' fields in the JSON above for exact file locations"
             echo "5. 🔍 Look for 'commit' fields to see which commits introduced the secrets"
             echo ""
-            echo "💡 Manual review required - check the JSON output above for:"
-            echo "   • File paths (look for 'file': fields)"
-            echo "   • Commit hashes (look for 'commit': fields)"
-            echo "   • Secret types (look for 'DetectorName': fields)"
+            echo "💡 Manual review required - check the output above for:"
+            echo "   • File paths (look for 'file': fields in JSON)"
+            echo "   • Commit hashes (shown with each key below)"
+            echo "   • Secret types (DetectorName shown with each key)"
             echo ""
             # Conditionally show keys based on show_keys input
             if [ "${{ inputs.show_keys }}" == "true" ]; then
               echo ""
               echo "🔑 Keys found by TruffleHog:"
+              echo "Format: Commit: <commit-hash> | <detector-name>: <secret-value>"
               echo "================================"
-              cat findings.json | jq -r '.DetectorName + ": " + .Raw' 2>/dev/null || echo "Could not parse findings for display"
+              # Display keys with commit hash information
+              cat findings.json | jq -r 'if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then "Commit: " + .SourceMetadata.Git.Commit + " | " + .DetectorName + ": " + .Raw else .DetectorName + ": " + .Raw end' 2>/dev/null || echo "Could not parse findings for display"
               echo "================================"
             else
               echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
