@@ -33,6 +33,11 @@ on:
         required: false
         default: false
         type: boolean
+      allowed_outdated_libraries:
+        description: "Comma-separated list of library names that are allowed to be outdated (e.g., 'typescript,eslint')"
+        required: false
+        default: ""
+        type: string
 
 # Minimal permissions for security scanning
 permissions:
@@ -62,7 +67,54 @@ jobs:
         continue-on-error: ${{ inputs.continue_on_error }}
 
       - name: Run npm outdated check
-        run: npm outdated
+        run: |
+          echo "🔍 Checking for outdated dependencies..."
+
+          # Get the list of allowed outdated libraries
+          ALLOWED_LIBS="${{ inputs.allowed_outdated_libraries }}"
+
+          if [ -n "$ALLOWED_LIBS" ]; then
+            echo "📋 Libraries allowed to be outdated: $ALLOWED_LIBS"
+            
+            # Run npm outdated and filter out allowed libraries
+            npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_LIBS" '
+              if . then
+                to_entries[] | 
+                select(.key | split(",") | any(. == $allowed | split(",")[] | . == .)) | 
+                "ALLOWED: \(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
+              else
+                empty
+              end
+            ' || echo "✅ No outdated dependencies found"
+            
+            # Check for non-allowed outdated libraries
+            UNAUTHORIZED_OUTDATED=$(npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_LIBS" '
+              if . then
+                [to_entries[] | 
+                select(.key | split(",") | any(. == $allowed | split(",")[] | . == .) | not)] | 
+                if length > 0 then
+                  .[] | "\(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
+                else
+                  empty
+                end
+              else
+                empty
+              end
+            ')
+            
+            if [ -n "$UNAUTHORIZED_OUTDATED" ]; then
+              echo "❌ UNAUTHORIZED OUTDATED DEPENDENCIES DETECTED:"
+              echo "$UNAUTHORIZED_OUTDATED"
+              echo ""
+              echo "🚨 BUILD FAILED: These dependencies must be updated"
+              exit 1
+            else
+              echo "✅ All outdated dependencies are in the allowed list"
+            fi
+          else
+            echo "📋 No libraries are allowed to be outdated - checking all dependencies"
+            npm outdated
+          fi
         continue-on-error: ${{ inputs.continue_on_error }}
 
       - name: Run OWASP Dependency Check
@@ -152,11 +204,21 @@ jobs:
                   body: comment
                 });
               } else {
+                let comment = '## 🔒 Node.js Security Scan Results\n\n✅ **No vulnerabilities found at the configured audit level.**\n\n';
+                
+                // Add information about allowed outdated libraries if configured
+                const allowedLibs = '${{ inputs.allowed_outdated_libraries }}';
+                if (allowedLibs && allowedLibs.trim() !== '') {
+                  comment += `📋 **Libraries allowed to be outdated:** ${allowedLibs}\n\n`;
+                }
+                
+                comment += 'Note: High severity vulnerabilities will always fail the build regardless of the audit level setting.';
+                
                 await github.rest.issues.createComment({
                   issue_number: context.issue.number,
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  body: '## 🔒 Node.js Security Scan Results\n\n✅ **No vulnerabilities found at the configured audit level.**\n\nNote: High severity vulnerabilities will always fail the build regardless of the audit level setting.'
+                  body: comment
                 });
               }
             } catch (error) {

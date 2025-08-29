@@ -1,18 +1,30 @@
-name: Security Scan
+name: Example: Node.js Security Scan with Allowed Outdated Libraries
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
-    branches: ["**"]
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
 
 jobs:
-  security:
-    uses: codelittinc/security-actions/.github/workflows/node-security-dependency-scan.yml@main
+  security-scan:
+    uses: ./.github/workflows/node-security-dependency-scan.yml
     with:
-      project_name: "my-awesome-nodejs-app"
+      project_name: "my-node-project"
       node_version: "18"
       fail_on_cvss: "7"
       enable_retired: true
       audit_level: "moderate"
       continue_on_error: false
+      # Define libraries that are okay to be outdated
+      # This can be useful for:
+      # - Development tools that don't affect production security
+      # - Libraries that are intentionally kept at older versions for compatibility
+      # - Libraries that are being gradually migrated
+      allowed_outdated_libraries: "typescript,eslint,prettier,jest"
+    
+    # Optional: Add additional permissions if needed
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write  # If you want to upload security findings to GitHub Security tab
