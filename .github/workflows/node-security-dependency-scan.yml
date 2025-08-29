@@ -34,7 +34,7 @@ on:
         default: false
         type: boolean
       allowed_outdated_libraries:
-        description: "Comma-separated list of library names that are allowed to be outdated (e.g., 'typescript,eslint')"
+        description: "Comma-separated list of library names that are allowed to be outdated (e.g., 'typescript,eslint,prettier')"
         required: false
         default: ""
         type: string
@@ -71,45 +71,54 @@ jobs:
           echo "🔍 Checking for outdated dependencies..."
 
           # Get the list of allowed outdated libraries
-          ALLOWED_LIBS="${{ inputs.allowed_outdated_libraries }}"
+          ALLOWED_LIBS='${{ inputs.allowed_outdated_libraries }}'
 
           if [ -n "$ALLOWED_LIBS" ]; then
             echo "📋 Libraries allowed to be outdated: $ALLOWED_LIBS"
             
-            # Run npm outdated and filter out allowed libraries
-            npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_LIBS" '
-              if . then
-                to_entries[] | 
-                select(.key | split(",") | any(. == $allowed | split(",")[] | . == .)) | 
-                "ALLOWED: \(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
-              else
-                empty
-              end
-            ' || echo "✅ No outdated dependencies found"
+            # Clean up the allowed libraries string (remove spaces, normalize)
+            ALLOWED_CLEAN=$(echo "$ALLOWED_LIBS" | tr -d ' ' | tr ',' '\n' | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
+            echo "📋 Cleaned allowed libraries: $ALLOWED_CLEAN"
             
-            # Check for non-allowed outdated libraries
-            UNAUTHORIZED_OUTDATED=$(npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_LIBS" '
-              if . then
-                [to_entries[] | 
-                select(.key | split(",") | any(. == $allowed | split(",")[] | . == .) | not)] | 
-                if length > 0 then
-                  .[] | "\(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
+            if [ -n "$ALLOWED_CLEAN" ]; then
+              # Run npm outdated and filter out allowed libraries
+              npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_CLEAN" '
+                if . then
+                  to_entries[] |
+                  select(.key | IN($allowed | split(","))) |
+                  "ALLOWED: \(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
                 else
                   empty
                 end
+              ' || echo "✅ No outdated dependencies found"
+              
+              # Check for non-allowed outdated libraries
+              UNAUTHORIZED_OUTDATED=$(npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_CLEAN" '
+                if . then
+                  [to_entries[] |
+                  select(.key | IN($allowed | split(",")) | not)] |
+                  if length > 0 then
+                    .[] | "\(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
+                  else
+                    empty
+                  end
+                else
+                  empty
+                end
+              ')
+              
+              if [ -n "$UNAUTHORIZED_OUTDATED" ]; then
+                echo "❌ UNAUTHORIZED OUTDATED DEPENDENCIES DETECTED:"
+                echo "$UNAUTHORIZED_OUTDATED"
+                echo ""
+                echo "🚨 BUILD FAILED: These dependencies must be updated"
+                exit 1
               else
-                empty
-              end
-            ')
-            
-            if [ -n "$UNAUTHORIZED_OUTDATED" ]; then
-              echo "❌ UNAUTHORIZED OUTDATED DEPENDENCIES DETECTED:"
-              echo "$UNAUTHORIZED_OUTDATED"
-              echo ""
-              echo "🚨 BUILD FAILED: These dependencies must be updated"
-              exit 1
+                echo "✅ All outdated dependencies are in the allowed list"
+              fi
             else
-              echo "✅ All outdated dependencies are in the allowed list"
+              echo "📋 No valid library names found in the allowed list"
+              npm outdated
             fi
           else
             echo "📋 No libraries are allowed to be outdated - checking all dependencies"
