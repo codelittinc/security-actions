@@ -63,93 +63,11 @@ jobs:
         run: npm ci
 
       - name: Run npm audit
-        run: npm audit --audit-level=${{ inputs.audit_level }}
+        run: ./scripts/node-security-dependency-scan/run-npm-audit.sh ${{ inputs.audit_level }} ${{ inputs.continue_on_error }}
         continue-on-error: ${{ inputs.continue_on_error }}
 
       - name: Run npm outdated check
-        run: |
-          echo "🔍 Checking for outdated dependencies..."
-
-          # Get the list of allowed outdated libraries
-          ALLOWED_LIBS='${{ inputs.allowed_outdated_libraries }}'
-
-          if [ -n "$ALLOWED_LIBS" ]; then
-            echo "📋 Libraries allowed to be outdated: $ALLOWED_LIBS"
-            
-            # Clean up the allowed libraries string (remove spaces, normalize)
-            ALLOWED_CLEAN=$(echo "$ALLOWED_LIBS" | tr -d ' ' | tr ',' '\n' | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
-            echo "📋 Cleaned allowed libraries: $ALLOWED_CLEAN"
-            
-            if [ -n "$ALLOWED_CLEAN" ]; then
-              # Run npm outdated and filter out allowed libraries
-              npm outdated --json 2>/dev/null | jq -r --arg allowed "$ALLOWED_CLEAN" '
-                if . then
-                  to_entries[] |
-                  select(.key | IN($allowed | split(","))) |
-                  "ALLOWED: \(.key) - Current: \(.value.current) -> Latest: \(.value.latest)"
-                else
-                  empty
-                end
-              ' || echo "✅ No outdated dependencies found"
-              
-              # Check for non-allowed outdated libraries using a simpler approach
-              UNAUTHORIZED_OUTDATED=""
-              
-              # Use a simpler bash-based approach to filter out allowed libraries
-              UNAUTHORIZED_OUTDATED=""
-              
-              # Get all outdated packages
-              npm outdated --json 2>/dev/null > /tmp/all_outdated.json || true
-              
-              if [ -s /tmp/all_outdated.json ]; then
-                # Convert allowed libraries to a format we can use with grep
-                ALLOWED_PATTERN=$(echo "$ALLOWED_CLEAN" | tr ',' '|')
-                
-                # Extract package names that are NOT in the allowed list
-                jq -r 'to_entries[] | .key' /tmp/all_outdated.json | grep -vE "^($ALLOWED_PATTERN)$" > /tmp/unauthorized_names.txt || true
-                
-                if [ -s /tmp/unauthorized_names.txt ]; then
-                  # Get full details for unauthorized packages
-                  while IFS= read -r pkg; do
-                    if [ -n "$pkg" ]; then
-                      pkg_info=$(jq -r --arg pkg "$pkg" '.[$pkg] | "\($pkg) - Current: \(.current) -> Latest: \(.latest)"' /tmp/all_outdated.json 2>/dev/null || echo "")
-                      if [ -n "$pkg_info" ]; then
-                        UNAUTHORIZED_OUTDATED="${UNAUTHORIZED_OUTDATED}${pkg_info}"$'\n'
-                      fi
-                    fi
-                  done < /tmp/unauthorized_names.txt
-                  
-                  # Remove trailing newline
-                  UNAUTHORIZED_OUTDATED=$(echo "$UNAUTHORIZED_OUTDATED" | sed 's/^$//')
-                fi
-              fi
-              
-              if [ -n "$UNAUTHORIZED_OUTDATED" ]; then
-                echo "❌ UNAUTHORIZED OUTDATED DEPENDENCIES DETECTED:"
-                echo "$UNAUTHORIZED_OUTDATED"
-                echo ""
-                echo "🚨 BUILD FAILED: These dependencies must be updated"
-                
-                # Clean up temporary files
-                rm -f /tmp/all_outdated.json /tmp/unauthorized_names.txt
-                exit 1
-              else
-                echo "✅ All outdated dependencies are in the allowed list"
-                
-                # Clean up temporary files
-                rm -f /tmp/all_outdated.json /tmp/unauthorized_names.txt
-              fi
-            else
-              echo "📋 No valid library names found in the allowed list"
-              npm outdated
-            fi
-          else
-            echo "📋 No libraries are allowed to be outdated - checking all dependencies"
-            npm outdated
-          fi
-
-          # Clean up any temporary files that might have been left behind
-          rm -f /tmp/all_outdated.json /tmp/unauthorized_names.txt /tmp/unauthorized_outdated.txt
+        run: ./scripts/node-security-dependency-scan/check-outdated-dependencies.sh '${{ inputs.allowed_outdated_libraries }}' ${{ inputs.continue_on_error }}
         continue-on-error: ${{ inputs.continue_on_error }}
 
       - name: Run OWASP Dependency Check
@@ -166,38 +84,7 @@ jobs:
 
       - name: Check for High Severity Vulnerabilities
         if: ${{ !inputs.continue_on_error }}
-        run: |
-          echo "🔍 Checking for high severity vulnerabilities..."
-
-          # Check npm audit for high/critical vulnerabilities
-          if npm audit --audit-level=high --json | jq -e '.vulnerabilities | length > 0' > /dev/null 2>&1; then
-            echo "❌ HIGH SEVERITY VULNERABILITIES DETECTED!"
-            echo "npm audit found high or critical vulnerabilities that must be fixed."
-            echo ""
-            echo "Vulnerability details:"
-            npm audit --audit-level=high
-            echo ""
-            echo "🚨 BUILD FAILED: High severity vulnerabilities detected"
-            echo "Please fix these vulnerabilities before proceeding."
-            exit 1
-          fi
-
-          # Check OWASP report for high CVSS scores
-          if [ -f "reports/dependency-check-report.xml" ]; then
-            echo "🔍 Checking OWASP report for high CVSS vulnerabilities..."
-            
-            # Check if there are any vulnerabilities with CVSS >= 7 (high)
-            if grep -q 'severity="High"' reports/dependency-check-report.xml 2>/dev/null; then
-              echo "❌ HIGH CVSS VULNERABILITIES DETECTED IN OWASP REPORT!"
-              echo "OWASP Dependency Check found high severity vulnerabilities."
-              echo ""
-              echo "🚨 BUILD FAILED: High CVSS vulnerabilities detected"
-              echo "Please review the OWASP report and fix high severity issues."
-              exit 1
-            fi
-          fi
-
-          echo "✅ No high severity vulnerabilities detected"
+        run: ./scripts/node-security-dependency-scan/check-high-severity-vulnerabilities.sh ${{ inputs.continue_on_error }}
 
       - name: Upload OWASP report
         uses: actions/upload-artifact@v4
@@ -207,77 +94,10 @@ jobs:
           path: reports/
           retention-days: 30
 
-      - name: Comment PR with security findings
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-
-            // Check if npm audit found vulnerabilities
-            try {
-              const auditResult = await $exec('npm audit --json --audit-level=${{ inputs.audit_level }}');
-              const auditData = JSON.parse(auditResult.stdout);
-              
-              if (auditData.vulnerabilities && Object.keys(auditData.vulnerabilities).length > 0) {
-                let comment = '## 🔒 Node.js Security Scan Results\n\n';
-                comment += '⚠️ **Vulnerabilities found in dependencies:**\n\n';
-                
-                for (const [pkg, vuln] of Object.entries(auditData.vulnerabilities)) {
-                  comment += `- **${pkg}**: ${vuln.title} (Severity: ${vuln.severity})\n`;
-                  comment += `  - Fixed in: ${vuln.fixedIn || 'Not available'}\n`;
-                  comment += `  - More info: ${vuln.url}\n\n`;
-                }
-                
-                comment += 'Please review and update vulnerable dependencies.';
-                
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: comment
-                });
-              } else {
-                let comment = '## 🔒 Node.js Security Scan Results\n\n✅ **No vulnerabilities found at the configured audit level.**\n\n';
-                
-                // Add information about allowed outdated libraries if configured
-                const allowedLibs = '${{ inputs.allowed_outdated_libraries }}';
-                if (allowedLibs && allowedLibs.trim() !== '') {
-                  comment += `📋 **Libraries allowed to be outdated:** ${allowedLibs}\n\n`;
-                }
-                
-                comment += 'Note: High severity vulnerabilities will always fail the build regardless of the audit level setting.';
-                
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: comment
-                });
-              }
-            } catch (error) {
-              console.log('Error processing npm audit results:', error);
-            }
-
       - name: Security Gate Check
         if: ${{ !inputs.continue_on_error }}
-        run: |
-          echo "🔒 Final security gate check..."
+        run: ./scripts/node-security-dependency-scan/security-gate-check.sh ${{ inputs.audit_level }} ${{ inputs.continue_on_error }}
 
-          # Check if npm audit found vulnerabilities at the configured level
-          if npm audit --audit-level=${{ inputs.audit_level }} --json | jq -e '.vulnerabilities | length > 0' > /dev/null 2>&1; then
-            echo "❌ Security vulnerabilities detected at level '${{ inputs.audit_level }}' - build blocked"
-            echo "Please fix the vulnerabilities before proceeding"
-            exit 1
-          fi
-
-          # Double-check for high severity vulnerabilities (should have been caught earlier, but safety check)
-          if npm audit --audit-level=high --json | jq -e '.vulnerabilities | length > 0' > /dev/null 2>&1; then
-            echo "❌ CRITICAL: High severity vulnerabilities still detected - build blocked"
-            echo "This should not happen if previous checks passed. Please investigate."
-            exit 1
-          fi
-
-          echo "✅ Security gate passed - no vulnerabilities detected"
-          echo "✅ Build can proceed safely"
+      - name: Cleanup
+        if: always()
+        run: ./scripts/node-security-dependency-scan/cleanup.sh
