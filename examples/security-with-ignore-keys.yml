@@ -1,0 +1,52 @@
+name: Security Scan with Ignore Keys Examples
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # Example 1: Ignore common false positive keys
+  security-scan-basic:
+    name: Basic Security Scan
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: true
+      ignore_keys: "AWS_ACCESS_KEY_ID,API_KEY,ACCESS_TOKEN"
+    secrets:
+      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
+
+  # Example 2: Ignore specific project keys that are known to be safe
+  security-scan-project-specific:
+    name: Project-Specific Ignore Keys
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: true # Show keys for debugging
+      notify_webhook: true
+      ignore_keys: "MY_PROJECT_KEY,DEV_API_KEY,TEST_CREDENTIAL"
+    secrets:
+      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
+
+  # Example 3: Ignore multiple types of keys
+  security-scan-comprehensive:
+    name: Comprehensive Ignore Keys
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: true
+      ignore_keys: "AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,API_KEY,ACCESS_TOKEN,BEARER_TOKEN,JWT_SECRET,PRIVATE_KEY"
+    secrets:
+      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}
+
+  # Example 4: No ignored keys (strict mode)
+  security-scan-strict:
+    name: Strict Security Scan
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: true
+      # No ignore_keys specified - will fail on any detected secrets
+    secrets:
+      webhook_url: ${{ secrets.SECURITY_WEBHOOK_URL }}

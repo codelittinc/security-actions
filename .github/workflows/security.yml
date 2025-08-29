@@ -1,5 +1,9 @@
 name: Reusable Security Scan
 
+# Environment variables
+env:
+  TRUFFLEHOG_VERSION: "3.90.5"
+
 on:
   workflow_call:
     inputs:
@@ -13,6 +17,11 @@ on:
         required: false
         default: true
         type: boolean
+      ignore_keys:
+        description: "Comma-separated list of keys to ignore as false positives (e.g., 'AWS_ACCESS_KEY_ID,API_KEY')"
+        required: false
+        default: ""
+        type: string
     secrets:
       webhook_url:
         description: "Webhook URL for security alerts"
@@ -96,11 +105,17 @@ jobs:
             local SINCE_COMMIT="$2"
             local CURRENT_BRANCH="$3"
             local CURRENT_COMMIT="$4"
+            local IGNORE_KEYS="$5"
 
             echo "🔍 Running TruffleHog scan..."
             echo "📋 Scanning from: $(printf %q "$SINCE_COMMIT")"
             echo "📋 Scanning to: $(printf %q "$CURRENT_COMMIT")"
             echo "🌿 Branch: $(printf %q "$CURRENT_BRANCH")"
+            
+            # Show ignored keys if any
+            if [ -n "$IGNORE_KEYS" ]; then
+              echo "🚫 Ignoring keys: $(printf %q "$IGNORE_KEYS")"
+            fi
             echo ""
 
             # Show commits to be scanned
@@ -132,6 +147,59 @@ jobs:
             printf "📊 TruffleHog scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
             return $TRUFFLEHOG_EXIT_CODE
           }
+
+          # Function to filter out ignored keys
+          filter_ignored_keys() {
+            local INPUT_FILE="$1"
+            local OUTPUT_FILE="$2"
+            local IGNORE_KEYS="$3"
+
+            if [ -z "$IGNORE_KEYS" ]; then
+              # No keys to ignore, just copy the input to output
+              cp "$INPUT_FILE" "$OUTPUT_FILE"
+              return 0
+            fi
+
+            echo "🔍 Filtering out ignored keys..."
+            
+            # Create a temporary file for filtered results
+            local TEMP_FILTERED="/tmp/filtered_$(basename "$OUTPUT_FILE")"
+            
+            # Initialize output file
+            touch "$OUTPUT_FILE"
+            
+            # Process each line that contains SourceMetadata (actual findings)
+            while IFS= read -r line; do
+              if echo "$line" | grep -q '"SourceMetadata"'; then
+                # Check if this finding should be ignored
+                local SHOULD_IGNORE=false
+                
+                # Convert comma-separated ignore keys to array and check each one
+                IFS=',' read -ra IGNORE_ARRAY <<< "$IGNORE_KEYS"
+                for ignore_key in "${IGNORE_ARRAY[@]}"; do
+                  # Trim whitespace
+                  ignore_key=$(echo "$ignore_key" | xargs)
+                  
+                  # Check if the Raw field contains this ignored key
+                  if echo "$line" | grep -qi "\"Raw\".*\"$ignore_key\""; then
+                    echo "🚫 Ignoring finding containing key: $ignore_key"
+                    SHOULD_IGNORE=true
+                    break
+                  fi
+                done
+                
+                # Only add to output if not ignored
+                if [ "$SHOULD_IGNORE" = false ]; then
+                  echo "$line" >> "$OUTPUT_FILE"
+                fi
+              else
+                # Keep non-finding lines (log messages, etc.)
+                echo "$line" >> "$OUTPUT_FILE"
+              fi
+            done < "$INPUT_FILE"
+            
+            echo "✅ Filtering completed"
+          }
           EOF
 
           chmod +x /tmp/trufflehog_scan.sh
@@ -139,8 +207,8 @@ jobs:
       - name: Install TruffleHog (Secure)
         continue-on-error: true
         run: |
-          # Pin to specific version for reproducibility and security
-          TRUFFLEHOG_VERSION="3.90.2"
+          # Use environment variable for version
+          TRUFFLEHOG_VERSION="${{ env.TRUFFLEHOG_VERSION }}"
           TRUFFLEHOG_ARCH="linux_amd64"
           TRUFFLEHOG_BINARY="trufflehog_${TRUFFLEHOG_VERSION}_${TRUFFLEHOG_ARCH}.tar.gz"
           TRUFFLEHOG_CHECKSUMS="trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
@@ -212,9 +280,19 @@ jobs:
             printf "📋 Scanning all commits in '%s' not in '%s'\n" "$(printf %q "$CURRENT_BRANCH")" "$(printf %q "$DEFAULT_BRANCH")"
           fi
 
+          # Get ignore keys from workflow input
+          IGNORE_KEYS="${{ inputs.ignore_keys }}"
+
           # Run TruffleHog scan using the reusable function
-          run_trufflehog_scan "trufflehog_output.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT"
+          run_trufflehog_scan "trufflehog_output.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT" "$IGNORE_KEYS"
           TRUFFLEHOG_EXIT_CODE=$?
+
+          # Filter out ignored keys if any are specified
+          if [ -n "$IGNORE_KEYS" ]; then
+            echo "🔍 Applying ignore keys filter..."
+            filter_ignored_keys "trufflehog_output.json" "filtered_output.json" "$IGNORE_KEYS"
+            mv "filtered_output.json" "trufflehog_output.json"
+          fi
 
           # Exit with the same code TruffleHog used
           exit $TRUFFLEHOG_EXIT_CODE
@@ -403,11 +481,21 @@ jobs:
 
           echo "🔍 Running final TruffleHog verification scan..."
 
+          # Get ignore keys from workflow input
+          IGNORE_KEYS="${{ inputs.ignore_keys }}"
+
           # Run TruffleHog for final verification using the reusable function
-          run_trufflehog_scan "final_verification.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT"
+          run_trufflehog_scan "final_verification.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT" "$IGNORE_KEYS"
           TRUFFLEHOG_EXIT_CODE=$?
 
           printf "📊 Final verification scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
+
+          # Filter out ignored keys if any are specified
+          if [ -n "$IGNORE_KEYS" ]; then
+            echo "🔍 Applying ignore keys filter to final verification..."
+            filter_ignored_keys "final_verification.json" "filtered_final.json" "$IGNORE_KEYS"
+            mv "filtered_final.json" "final_verification.json"
+          fi
 
           # Check if we have findings (without logging the actual content)
           if [ -s final_verification.json ]; then
