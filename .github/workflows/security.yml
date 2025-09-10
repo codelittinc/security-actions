@@ -307,20 +307,7 @@ jobs:
             grep '"SourceMetadata"' trufflehog_output.json > findings.json 2>/dev/null || touch findings.json
             TOTAL_COUNT=$(wc -l < findings.json)
             printf "Found %d secret findings\n" "$TOTAL_COUNT"
-            echo "⚠️  SECRETS DETECTED - Check the workflow output for details"
-            
-            # Conditionally show keys based on show_keys input
-            if [ "${{ inputs.show_keys }}" == "true" ]; then
-              echo ""
-              echo "🔑 Keys found by TruffleHog:"
-              echo "Format: Commit: <commit-hash> | <detector-name>: <secret-value>"
-              echo "================================"
-              # Display keys with commit hash information
-              cat findings.json | jq -r 'if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then "Commit: " + .SourceMetadata.Git.Commit + " | " + .DetectorName + ": " + .Raw else .DetectorName + ": " + .Raw end' 2>/dev/null || echo "Could not parse findings for display"
-              echo "================================"
-            else
-              echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
-            fi
+            echo "⚠️  SECRETS DETECTED - Details will be shown when the build fails"
           else
             echo "No secret findings detected"
             touch findings.json
@@ -349,23 +336,49 @@ jobs:
             echo "4. 🔍 Look for 'file' fields in the JSON above for exact file locations"
             echo "5. 🔍 Look for 'commit' fields to see which commits introduced the secrets"
             echo ""
-            echo "💡 Manual review required - check the output above for:"
-            echo "   • File paths (look for 'file': fields in JSON)"
-            echo "   • Commit hashes (shown with each key below)"
-            echo "   • Secret types (DetectorName shown with each key)"
+            echo "💡 Detailed findings shown below with file paths and secret types:"
             echo ""
-            # Conditionally show keys based on show_keys input
+            
+            # Always show key metadata (type, file, commit), conditionally show key values
+            echo "🔑 Secret findings detected:"
+            echo "================================"
+            
             if [ "${{ inputs.show_keys }}" == "true" ]; then
-              echo ""
-              echo "🔑 Keys found by TruffleHog:"
-              echo "Format: Commit: <commit-hash> | <detector-name>: <secret-value>"
-              echo "================================"
-              # Display keys with commit hash information
-              cat findings.json | jq -r 'if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then "Commit: " + .SourceMetadata.Git.Commit + " | " + .DetectorName + ": " + .Raw else .DetectorName + ": " + .Raw end' 2>/dev/null || echo "Could not parse findings for display"
-              echo "================================"
+              echo "Format: <detector-name> in <file> (Commit: <commit-hash>): <secret-value>"
+              # Display full information including key values
+              cat findings.json | jq -r '
+                if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
+                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                  "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + "): " + .Raw
+                else
+                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                  "unknown location") + ": " + .Raw
+                end
+              ' 2>/dev/null || echo "Could not parse findings for display"
             else
-              echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
+              echo "Format: <detector-name> in <file> (Commit: <commit-hash>)"
+              # Display metadata only, hide key values
+              cat findings.json | jq -r '
+                if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
+                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                  "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + ")"
+                else
+                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                  "unknown location")
+                end
+              ' 2>/dev/null || echo "Could not parse findings for display"
+              echo ""
+              echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
             fi
+            echo "================================"
             echo ""
             echo "⚠️  Once committed to Git, consider these credentials compromised!"
           else
@@ -509,7 +522,51 @@ jobs:
               TOTAL_COUNT=$(wc -l < final_findings.json)
               echo "🚨 FINAL VERIFICATION: SECRETS DETECTED 🚨"
               printf "TruffleHog found %d potential credential(s) in final verification.\n" "$TOTAL_COUNT"
+              echo ""
+              
+              # Show detailed findings with key metadata (type, file, commit), conditionally show key values
+              echo "🔑 Secret findings detected:"
+              echo "================================"
+              
+              if [ "${{ inputs.show_keys }}" == "true" ]; then
+                echo "Format: <detector-name> in <file> (Commit: <commit-hash>): <secret-value>"
+                # Display full information including key values
+                cat final_findings.json | jq -r '
+                  if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
+                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                    "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + "): " + .Raw
+                  else
+                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                    "unknown location") + ": " + .Raw
+                  end
+                ' 2>/dev/null || echo "Could not parse findings for display"
+              else
+                echo "Format: <detector-name> in <file> (Commit: <commit-hash>)"
+                # Display metadata only, hide key values
+                cat final_findings.json | jq -r '
+                  if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
+                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                    "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + ")"
+                  else
+                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
+                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
+                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
+                    "unknown location")
+                  end
+                ' 2>/dev/null || echo "Could not parse findings for display"
+                echo ""
+                echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
+              fi
+              echo "================================"
+              echo ""
               echo "🚨 FAILING BUILD DUE TO DETECTED SECRETS 🚨"
+              
               # Clean up sensitive files before exiting
               rm -f final_verification.json final_findings.json 2>/dev/null || true
               exit 1
