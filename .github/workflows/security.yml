@@ -309,18 +309,35 @@ jobs:
             printf "Found %d secret findings\n" "$TOTAL_COUNT"
             echo "⚠️  SECRETS DETECTED - Check the workflow output for details"
             
-            # Conditionally show keys based on show_keys input
+            # Always show key metadata (type, file, commit), conditionally show key values
+            echo ""
+            echo "🔑 Secret findings detected:"
+            echo "================================"
+            
             if [ "${{ inputs.show_keys }}" == "true" ]; then
-              echo ""
-              echo "🔑 Keys found by TruffleHog:"
-              echo "Format: Commit: <commit-hash> | <detector-name>: <secret-value>"
-              echo "================================"
-              # Display keys with commit hash information
-              cat findings.json | jq -r 'if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then "Commit: " + .SourceMetadata.Git.Commit + " | " + .DetectorName + ": " + .Raw else .DetectorName + ": " + .Raw end' 2>/dev/null || echo "Could not parse findings for display"
-              echo "================================"
+              echo "Format: <detector-name> in <file> (Commit: <commit-hash>): <secret-value>"
+              # Display full information including key values
+              cat findings.json | jq -r '
+                if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file") + " (Commit: " + .SourceMetadata.Git.Commit + "): " + .Raw
+                else
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file") + ": " + .Raw
+                end
+              ' 2>/dev/null || echo "Could not parse findings for display"
             else
-              echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
+              echo "Format: <detector-name> in <file> (Commit: <commit-hash>)"
+              # Display metadata only, hide key values
+              cat findings.json | jq -r '
+                if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file") + " (Commit: " + .SourceMetadata.Git.Commit + ")"
+                else
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file")
+                end
+              ' 2>/dev/null || echo "Could not parse findings for display"
+              echo ""
+              echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
             fi
+            echo "================================"
           else
             echo "No secret findings detected"
             touch findings.json
@@ -349,23 +366,37 @@ jobs:
             echo "4. 🔍 Look for 'file' fields in the JSON above for exact file locations"
             echo "5. 🔍 Look for 'commit' fields to see which commits introduced the secrets"
             echo ""
-            echo "💡 Manual review required - check the output above for:"
-            echo "   • File paths (look for 'file': fields in JSON)"
-            echo "   • Commit hashes (shown with each key below)"
-            echo "   • Secret types (DetectorName shown with each key)"
+            echo "💡 Detailed findings shown below with file paths and secret types:"
             echo ""
-            # Conditionally show keys based on show_keys input
+            
+            # Always show key metadata (type, file, commit), conditionally show key values
+            echo "🔑 Secret findings detected:"
+            echo "================================"
+            
             if [ "${{ inputs.show_keys }}" == "true" ]; then
-              echo ""
-              echo "🔑 Keys found by TruffleHog:"
-              echo "Format: Commit: <commit-hash> | <detector-name>: <secret-value>"
-              echo "================================"
-              # Display keys with commit hash information
-              cat findings.json | jq -r 'if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then "Commit: " + .SourceMetadata.Git.Commit + " | " + .DetectorName + ": " + .Raw else .DetectorName + ": " + .Raw end' 2>/dev/null || echo "Could not parse findings for display"
-              echo "================================"
+              echo "Format: <detector-name> in <file> (Commit: <commit-hash>): <secret-value>"
+              # Display full information including key values
+              cat findings.json | jq -r '
+                if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file") + " (Commit: " + .SourceMetadata.Git.Commit + "): " + .Raw
+                else
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file") + ": " + .Raw
+                end
+              ' 2>/dev/null || echo "Could not parse findings for display"
             else
-              echo "ℹ️  Keys are hidden by default. Set show_keys: true to display them."
+              echo "Format: <detector-name> in <file> (Commit: <commit-hash>)"
+              # Display metadata only, hide key values
+              cat findings.json | jq -r '
+                if .SourceMetadata and .SourceMetadata.Git and .SourceMetadata.Git.Commit then
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file") + " (Commit: " + .SourceMetadata.Git.Commit + ")"
+                else
+                  .DetectorName + " in " + (.SourceMetadata.Git.File // "unknown file")
+                end
+              ' 2>/dev/null || echo "Could not parse findings for display"
+              echo ""
+              echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
             fi
+            echo "================================"
             echo ""
             echo "⚠️  Once committed to Git, consider these credentials compromised!"
           else
