@@ -388,7 +388,7 @@ jobs:
           exit 1
 
       - name: Send Security Alert to Webhook
-        if: always() && inputs.notify_webhook == 'true'
+        if: always() && inputs.notify_webhook
         continue-on-error: true
         env:
           # Webhook URL from workflow secret
@@ -475,7 +475,7 @@ jobs:
           fi
 
       - name: Handle Webhook Disabled
-        if: always() && inputs.notify_webhook != 'true'
+        if: always() && !inputs.notify_webhook
         run: |
           echo "ℹ️  Webhook notifications are disabled. Set notify_webhook: true to enable them."
           # Clean up any remaining files even if no secrets found
