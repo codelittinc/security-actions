@@ -1,0 +1,154 @@
+name: Test Security Action
+
+on:
+  push:
+    branches: [main, feat/*, test/*, show-keys]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allow manual triggering
+
+env:
+  # Use Docker for consistent testing environment
+  DOCKER_IMAGE: security-action-tests
+
+jobs:
+  # Test the action itself
+  test-security-action:
+    name: Test Security Action Components
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for git tests
+
+      - name: Build test Docker image
+        run: |
+          docker build -f Dockerfile.test -t ${{ env.DOCKER_IMAGE }} .
+
+      - name: Run all tests in Docker
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            ${{ env.DOCKER_IMAGE }} \
+            ./test/run-all-tests.sh
+
+      - name: Test workflow syntax validation
+        run: |
+          # Validate GitHub Actions workflow syntax
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            rhyeal/yamllint:latest \
+            yamllint .github/workflows/security.yml
+
+  # Integration test: Call the actual security workflow
+  integration-test-clean-repo:
+    name: Integration Test - Clean Repository
+    needs: test-security-action
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: false
+      ignore_keys: ""
+    secrets:
+      webhook_url: "https://httpbin.org/post"
+
+  # Test different input combinations
+  test-input-combinations-true-true:
+    name: Test Input Combinations (show_keys=true, notify_webhook=true)
+    needs: test-security-action
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: true
+      notify_webhook: true
+      ignore_keys: ""
+    secrets:
+      webhook_url: "https://httpbin.org/post"
+
+  test-input-combinations-true-false:
+    name: Test Input Combinations (show_keys=true, notify_webhook=false)
+    needs: test-security-action
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: true
+      notify_webhook: false
+      ignore_keys: ""
+    secrets:
+      webhook_url: "https://httpbin.org/post"
+
+  test-input-combinations-false-true:
+    name: Test Input Combinations (show_keys=false, notify_webhook=true)
+    needs: test-security-action
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: true
+      ignore_keys: ""
+    secrets:
+      webhook_url: "https://httpbin.org/post"
+
+  test-input-combinations-false-false:
+    name: Test Input Combinations (show_keys=false, notify_webhook=false)
+    needs: test-security-action
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: false
+      ignore_keys: ""
+    secrets:
+      webhook_url: "https://httpbin.org/post"
+
+  # Test edge cases
+  test-edge-cases:
+    name: Test Edge Cases
+    needs: test-security-action
+    uses: ./.github/workflows/security.yml
+    with:
+      show_keys: false
+      notify_webhook: false
+      ignore_keys: "key1,key2,key3,very_long_key_name_that_should_still_work,another_key,final_key"
+    secrets:
+      webhook_url: "https://httpbin.org/post"
+
+  # Test report
+  test-report:
+    name: Generate Test Report
+    runs-on: ubuntu-latest
+    needs:
+      [
+        test-security-action,
+        integration-test-clean-repo,
+        test-input-combinations-true-true,
+        test-input-combinations-true-false,
+        test-input-combinations-false-true,
+        test-input-combinations-false-false,
+        test-edge-cases,
+      ]
+    if: always()
+
+    steps:
+      - name: Generate test report
+        run: |
+          echo "# Security Action Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit & Component Tests | ${{ needs.test-security-action.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Clean Repository Test | ${{ needs.integration-test-clean-repo.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Input Test (true,true) | ${{ needs.test-input-combinations-true-true.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Input Test (true,false) | ${{ needs.test-input-combinations-true-false.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Input Test (false,true) | ${{ needs.test-input-combinations-false-true.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Input Test (false,false) | ${{ needs.test-input-combinations-false-false.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Edge Cases Test | ${{ needs.test-edge-cases.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Test Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Unit tests for shell functions" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Workflow syntax validation" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Clean repository scanning" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Input parameter combinations" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Edge cases and error handling" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Webhook notification logic" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ JSON processing and file path extraction" >> $GITHUB_STEP_SUMMARY

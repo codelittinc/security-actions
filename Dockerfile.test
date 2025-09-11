@@ -1,0 +1,36 @@
+FROM ubuntu:22.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    jq \
+    bats \
+    nodejs \
+    npm \
+    bash \
+    python3 \
+    python3-pip \
+    python3-yaml \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install act for GitHub Actions testing
+RUN curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy test files
+COPY test/ test/
+COPY scripts/ scripts/
+COPY .github/ .github/
+
+# Make scripts executable
+RUN chmod +x test/mock-trufflehog.sh \
+    && chmod +x scripts/trufflehog-functions.sh
+
+# Set PATH to include test directory for mocks
+ENV PATH="/workspace/test:$PATH"
+
+# Default command runs all tests
+CMD ["./test/run-all-tests.sh"]

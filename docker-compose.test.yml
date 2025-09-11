@@ -1,0 +1,45 @@
+services:
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/workspace
+      - /workspace/node_modules # Prevent overwriting node_modules
+    working_dir: /workspace
+    environment:
+      - CI=true
+      - TEST_ENV=docker
+    command: ./test/run-all-tests.sh
+
+  test-interactive:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    environment:
+      - CI=true
+      - TEST_ENV=docker
+    entrypoint: /bin/bash
+    stdin_open: true
+    tty: true
+
+  test-unit-only:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: bats test/test-trufflehog-functions.bats
+
+  test-json-only:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: ./test/test-json-processing.sh
