@@ -1,3 +1,6 @@
+# Dependency vulnerability scanning. This workflow is reporting-only:
+# findings appear as warning annotations and a job summary, and never
+# fail the build. Use security.yml for secret scanning, which does block.
 name: Node.js Security Scan Example
 
 on:
@@ -8,12 +11,13 @@ on:
 
 jobs:
   security-scan:
-    uses: ./.github/workflows/node-security-dependency-scan.yml
+    uses: codelittinc/security-actions/.github/workflows/node-security-dependency-scan.yml@main
     with:
       project_name: "my-node-project"
-      node_version: "18"
-      fail_on_cvss: "7"
-      enable_retired: true
+      node_version: "24"
       audit_level: "moderate"
-      continue_on_error: false
-      allowed_outdated_libraries: "@hapi/address,react-router-dom,tabbable"
+      enable_retired: true
+      # OWASP Dependency Check is slow and ships a CVE database baked into
+      # its image (--noupdate). npm audit is the authoritative source for
+      # npm packages, so it is reasonable to turn OWASP off for pure Node repos.
+      run_owasp: true

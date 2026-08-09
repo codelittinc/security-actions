@@ -1,6 +1,12 @@
+# Secret scanning. Unlike the dependency scan, this one DOES block:
+# a committed credential is a live incident, not an advisory.
+#
+# Two scans run per invocation:
+#   1. git history for the range being pushed (catches newly added secrets)
+#   2. the checked-out working tree (catches secrets already sitting in the
+#      code from earlier commits, which a range scan alone never sees)
 name: Reusable Security Scan
 
-# Environment variables
 env:
   TRUFFLEHOG_VERSION: "3.90.5"
 
@@ -22,584 +28,314 @@ on:
         required: false
         default: ""
         type: string
+      scan_filesystem:
+        description: "Also scan the checked-out working tree, not just the pushed commit range"
+        required: false
+        default: true
+        type: boolean
     secrets:
       webhook_url:
         description: "Webhook URL for security alerts"
-        required: true
+        required: false
 
-# Minimal permissions for security
 permissions:
   contents: read
 
 jobs:
+  # Runs in parallel with secret-scan. It only gates the webhook, which is
+  # not needed until the very end, so blocking the scan on it wasted a
+  # whole runner start-up.
   validate-inputs:
     name: Validate Required Inputs
     runs-on: ubuntu-latest
-
-    # Set minimal permissions for this job
     permissions:
       contents: read
-
     steps:
       - name: Validate Webhook URL
+        env:
+          WEBHOOK_URL: ${{ secrets.webhook_url }}
+          NOTIFY: ${{ inputs.notify_webhook }}
         run: |
-          WEBHOOK_URL="${{ secrets.webhook_url }}"
+          if [ "$NOTIFY" != "true" ]; then
+            echo "ℹ️  Webhook notifications disabled - nothing to validate"
+            exit 0
+          fi
 
           if [ -z "$WEBHOOK_URL" ]; then
-            echo "❌ ERROR: webhook_url input is required but not provided"
-            echo "Please provide a webhook_url input when calling this workflow"
+            echo "❌ ERROR: notify_webhook is true but no webhook_url secret was provided"
             exit 1
           fi
 
-          # Validate webhook URL format
-          if ! echo "$WEBHOOK_URL" | grep -qE '^https?://'; then
-            echo "❌ ERROR: Invalid webhook URL format - must start with http:// or https://"
-            exit 1
-          fi
+          case "$WEBHOOK_URL" in
+            http://*|https://*) ;;
+            *) echo "❌ ERROR: Invalid webhook URL format - must start with http:// or https://"; exit 1 ;;
+          esac
 
           echo "✅ Webhook URL validation passed"
 
   secret-scan:
     name: TruffleHog Secret Scan
     runs-on: ubuntu-latest
-    needs: validate-inputs
-
-    # Set minimal permissions for this job
     permissions:
       contents: read
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup TruffleHog Scan Function
+      # No continue-on-error here on purpose. If the scanner cannot be
+      # installed the build must fail: previously a failed install produced
+      # zero findings, which was reported as "no secrets detected" and let
+      # the build pass without anything ever being scanned.
+      - name: Install TruffleHog
         run: |
-          # Create a reusable function for TruffleHog scanning
-          cat > /tmp/trufflehog_scan.sh << 'EOF'
-          #!/bin/bash
+          # TRUFFLEHOG_VERSION comes from the workflow-level env block.
+          set -euo pipefail
 
-          # Function to determine scan range
-          get_scan_range() {
-            local DEFAULT_BRANCH="$1"
-            local CURRENT_BRANCH="$2"
-            local BEFORE_COMMIT="$3"
+          BINARY="trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+          CHECKSUMS="trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
+          BASE="https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}"
 
-            if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-              # On default branch - scan only the pushed commits
-              if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
-                echo "HEAD~1"
-              else
-                echo "$BEFORE_COMMIT"
-              fi
+          echo "🔒 Installing TruffleHog v${TRUFFLEHOG_VERSION}"
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+
+          curl -sSfL -o "$BINARY" "${BASE}/${BINARY}"
+          curl -sSfL -o "$CHECKSUMS" "${BASE}/${CHECKSUMS}"
+
+          echo "🔍 Verifying checksum..."
+          grep " ${BINARY}\$" "$CHECKSUMS" | sha256sum -c -
+          echo "✅ Checksum verified"
+
+          tar -xzf "$BINARY"
+          sudo install -m 755 trufflehog /usr/local/bin/trufflehog
+          cd / && rm -rf "$TEMP_DIR"
+
+          trufflehog --version
+          echo "✅ TruffleHog installed"
+
+      - name: Run TruffleHog scans
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          BEFORE_COMMIT: ${{ github.event.before }}
+          SCAN_FILESYSTEM: ${{ inputs.scan_filesystem }}
+        run: |
+          set -uo pipefail
+          : > raw_findings.json
+
+          # --- scan 1: the commit range being pushed -------------------------
+          if [ "$CURRENT_BRANCH" = "$DEFAULT_BRANCH" ]; then
+            if [ -z "$BEFORE_COMMIT" ] || [ "$BEFORE_COMMIT" = "0000000000000000000000000000000000000000" ]; then
+              SINCE_COMMIT="HEAD~1"
             else
-              # On feature branch - scan all commits not in default branch
-              echo "origin/$DEFAULT_BRANCH"
+              SINCE_COMMIT="$BEFORE_COMMIT"
             fi
-          }
+            echo "🔍 Push to default branch ($DEFAULT_BRANCH)"
+          else
+            SINCE_COMMIT="origin/${DEFAULT_BRANCH}"
+            echo "🔍 Feature branch - scanning commits not in $DEFAULT_BRANCH"
+          fi
 
-          # Function to run TruffleHog scan
-          run_trufflehog_scan() {
-            local OUTPUT_FILE="$1"
-            local SINCE_COMMIT="$2"
-            local CURRENT_BRANCH="$3"
-            local CURRENT_COMMIT="$4"
-            local IGNORE_KEYS="$5"
+          echo "📋 Scanning git history since: $SINCE_COMMIT"
+          git log --oneline "${SINCE_COMMIT}..HEAD" 2>/dev/null || echo "(could not list commit range)"
 
-            echo "🔍 Running TruffleHog scan..."
-            echo "📋 Scanning from: $(printf %q "$SINCE_COMMIT")"
-            echo "📋 Scanning to: $(printf %q "$CURRENT_COMMIT")"
-            echo "🌿 Branch: $(printf %q "$CURRENT_BRANCH")"
-            
-            # Show ignored keys if any
-            if [ -n "$IGNORE_KEYS" ]; then
-              echo "🚫 Ignoring keys: $(printf %q "$IGNORE_KEYS")"
-            fi
-            echo ""
+          trufflehog git "file://." \
+            --since-commit="$SINCE_COMMIT" \
+            --branch=HEAD \
+            --no-verification \
+            --force-skip-binaries \
+            --force-skip-archives \
+            --no-update \
+            --json \
+            >> raw_findings.json 2>/dev/null
+          echo "📊 git scan exit code: $?"
 
-            # Show commits to be scanned
-            echo "📝 Commits to be scanned:"
-            if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-              git log --oneline "$(printf %q "$SINCE_COMMIT")..$(printf %q "$CURRENT_COMMIT")" || echo "No commits found in range"
-            else
-              git log --oneline "origin/$(printf %q "$DEFAULT_BRANCH")..HEAD" || echo "No commits found in range"
-            fi
-            echo ""
-
-            # Run TruffleHog
-            set +e  # Don't exit on error, we want to capture the exit code
-
-            trufflehog git file://. \
-              --since-commit="$(printf %q "$SINCE_COMMIT")" \
-              --branch="HEAD" \
+          # --- scan 2: the working tree as it stands now ---------------------
+          # A range scan only sees what this push touched. Secrets committed
+          # before the range are invisible to it, so scan the tree too.
+          if [ "$SCAN_FILESYSTEM" = "true" ]; then
+            echo "📋 Scanning working tree for pre-existing secrets"
+            trufflehog filesystem . \
               --no-verification \
               --force-skip-binaries \
               --force-skip-archives \
               --no-update \
               --json \
-              --log-level=2 \
-              > "$OUTPUT_FILE" 2>&1
-
-            local TRUFFLEHOG_EXIT_CODE=$?
-            set -e  # Re-enable exit on error
-
-            printf "📊 TruffleHog scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
-            return $TRUFFLEHOG_EXIT_CODE
-          }
-
-          # Function to filter out ignored keys
-          filter_ignored_keys() {
-            local INPUT_FILE="$1"
-            local OUTPUT_FILE="$2"
-            local IGNORE_KEYS="$3"
-
-            if [ -z "$IGNORE_KEYS" ]; then
-              # No keys to ignore, just copy the input to output
-              cp "$INPUT_FILE" "$OUTPUT_FILE"
-              return 0
-            fi
-
-            echo "🔍 Filtering out ignored keys..."
-            
-            # Create a temporary file for filtered results
-            local TEMP_FILTERED="/tmp/filtered_$(basename "$OUTPUT_FILE")"
-            
-            # Initialize output file
-            touch "$OUTPUT_FILE"
-            
-            # Process each line that contains SourceMetadata (actual findings)
-            while IFS= read -r line; do
-              if echo "$line" | grep -q '"SourceMetadata"'; then
-                # Check if this finding should be ignored
-                local SHOULD_IGNORE=false
-                
-                # Convert comma-separated ignore keys to array and check each one
-                IFS=',' read -ra IGNORE_ARRAY <<< "$IGNORE_KEYS"
-                for ignore_key in "${IGNORE_ARRAY[@]}"; do
-                  # Trim whitespace
-                  ignore_key=$(echo "$ignore_key" | xargs)
-                  
-                  # Check if the Raw field contains this ignored key
-                  if echo "$line" | grep -qi "\"Raw\".*\"$ignore_key\""; then
-                    echo "🚫 Ignoring finding containing key: $ignore_key"
-                    SHOULD_IGNORE=true
-                    break
-                  fi
-                done
-                
-                # Only add to output if not ignored
-                if [ "$SHOULD_IGNORE" = false ]; then
-                  echo "$line" >> "$OUTPUT_FILE"
-                fi
-              else
-                # Keep non-finding lines (log messages, etc.)
-                echo "$line" >> "$OUTPUT_FILE"
-              fi
-            done < "$INPUT_FILE"
-            
-            echo "✅ Filtering completed"
-          }
-          EOF
-
-          chmod +x /tmp/trufflehog_scan.sh
-
-      - name: Install TruffleHog (Secure)
-        continue-on-error: true
-        run: |
-          # Use environment variable for version
-          TRUFFLEHOG_VERSION="${{ env.TRUFFLEHOG_VERSION }}"
-          TRUFFLEHOG_ARCH="linux_amd64"
-          TRUFFLEHOG_BINARY="trufflehog_${TRUFFLEHOG_VERSION}_${TRUFFLEHOG_ARCH}.tar.gz"
-          TRUFFLEHOG_CHECKSUMS="trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
-
-          printf "🔒 Installing TruffleHog v%s\n" "$(printf %q "$TRUFFLEHOG_VERSION")"
-
-          # Create temporary directory
-          TEMP_DIR=$(mktemp -d)
-          cd "$TEMP_DIR"
-
-          # Download binary from GitHub releases (more secure than raw script)
-          echo "📥 Downloading TruffleHog binary..."
-          curl -sSfL -o "$(printf %q "$TRUFFLEHOG_BINARY")" \
-            "https://github.com/trufflesecurity/trufflehog/releases/download/v$(printf %q "$TRUFFLEHOG_VERSION")/$(printf %q "$TRUFFLEHOG_BINARY")"
-
-          # Download checksums file with correct filename format
-          echo "📥 Downloading checksums..."
-          curl -sSfL -o "$(printf %q "$TRUFFLEHOG_CHECKSUMS")" \
-            "https://github.com/trufflesecurity/trufflehog/releases/download/v$(printf %q "$TRUFFLEHOG_VERSION")/$(printf %q "$TRUFFLEHOG_CHECKSUMS")"
-
-          # Verify checksum
-          echo "🔍 Verifying checksum..."
-          if ! grep "$(printf %q "$TRUFFLEHOG_BINARY")" "$(printf %q "$TRUFFLEHOG_CHECKSUMS")" | sha256sum -c -; then
-            echo "❌ Checksum verification failed!"
-            exit 1
-          fi
-          echo "✅ Checksum verified successfully"
-
-          # Extract and install
-          echo "📦 Extracting TruffleHog..."
-          tar -xzf "$(printf %q "$TRUFFLEHOG_BINARY")"
-
-          # Move to system path with proper permissions
-          sudo install -m 755 trufflehog /usr/local/bin/trufflehog
-
-          # Cleanup
-          cd /
-          rm -rf "$(printf %q "$TEMP_DIR")"
-
-          # Verify installation
-          echo "🔍 Verifying installation..."
-          trufflehog --version
-          echo "✅ TruffleHog installed successfully"
-
-      - name: Run TruffleHog Scan
-        continue-on-error: true
-        run: |
-          # Source the reusable functions
-          source /tmp/trufflehog_scan.sh
-
-          # Get the default branch and current commit with proper escaping
-          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
-          CURRENT_COMMIT="${{ github.sha }}"
-          CURRENT_BRANCH="${{ github.ref_name }}"
-          BEFORE_COMMIT="${{ github.event.before }}"
-
-          # Determine scan range using the reusable function
-          SINCE_COMMIT=$(get_scan_range "$DEFAULT_BRANCH" "$CURRENT_BRANCH" "$BEFORE_COMMIT")
-
-          # Show scan context
-          if [ "$(printf %q "$CURRENT_BRANCH")" = "$(printf %q "$DEFAULT_BRANCH")" ]; then
-            if [ "$(printf %q "$BEFORE_COMMIT")" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_COMMIT" ]; then
-              echo "🔍 First commit on default branch"
-            else
-              printf "🔍 Push to default branch (%s)\n" "$(printf %q "$DEFAULT_BRANCH")"
-            fi
-          else
-            echo "🔍 Feature branch detected"
-            printf "📋 Scanning all commits in '%s' not in '%s'\n" "$(printf %q "$CURRENT_BRANCH")" "$(printf %q "$DEFAULT_BRANCH")"
+              >> raw_findings.json 2>/dev/null
+            echo "📊 filesystem scan exit code: $?"
           fi
 
-          # Get ignore keys from workflow input
-          IGNORE_KEYS="${{ inputs.ignore_keys }}"
+          # Keep only real findings; drop log lines.
+          grep '"SourceMetadata"' raw_findings.json > all_findings.json 2>/dev/null || : > all_findings.json
+          rm -f raw_findings.json
+          echo "📊 Raw findings: $(wc -l < all_findings.json)"
 
-          # Run TruffleHog scan using the reusable function
-          run_trufflehog_scan "trufflehog_output.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT" "$IGNORE_KEYS"
-          TRUFFLEHOG_EXIT_CODE=$?
+      - name: Filter and de-duplicate findings
+        env:
+          IGNORE_KEYS: ${{ inputs.ignore_keys }}
+        run: |
+          set -uo pipefail
 
-          # Filter out ignored keys if any are specified
+          # The two scans overlap, so the same secret appears twice. Key on
+          # detector + raw value only: the git source reports "src/config.ts"
+          # while the filesystem source reports "./src/config.ts", so keying
+          # on the path as well would fail to collapse the duplicate.
+          jq -sc 'unique_by([.DetectorName, .Raw]) | .[]' all_findings.json > deduped.json 2>/dev/null \
+            || cp all_findings.json deduped.json
+
           if [ -n "$IGNORE_KEYS" ]; then
-            echo "🔍 Applying ignore keys filter..."
-            filter_ignored_keys "trufflehog_output.json" "filtered_output.json" "$IGNORE_KEYS"
-            mv "filtered_output.json" "trufflehog_output.json"
+            echo "🚫 Applying ignore list"
+            # Drop any finding whose raw value contains an ignored key
+            # (case-insensitive), matching the previous behaviour.
+            jq -c --arg keys "$IGNORE_KEYS" '
+              ($keys | split(",") | map(ascii_downcase | gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $ignore
+              | select([ $ignore[] as $k | ((.Raw // "") | ascii_downcase | contains($k)) ] | any | not)
+            ' deduped.json > findings.json 2>/dev/null || cp deduped.json findings.json
+            echo "🚫 Ignored $(( $(wc -l < deduped.json) - $(wc -l < findings.json) )) finding(s)"
+          else
+            cp deduped.json findings.json
           fi
 
-          # Exit with the same code TruffleHog used
-          exit $TRUFFLEHOG_EXIT_CODE
+          rm -f all_findings.json deduped.json
+          echo "COUNT=$(wc -l < findings.json)" >> "$GITHUB_ENV"
+          printf "📊 Findings after filtering: %s\n" "$(wc -l < findings.json)"
 
-      - name: Process TruffleHog Results
+      - name: Report findings
         if: always()
+        env:
+          SHOW_KEYS: ${{ inputs.show_keys }}
         run: |
-          # Filter out log messages, keep only actual findings (lines with SourceMetadata)
-          # Use grep with -q to avoid logging the actual content
-          if grep -q '"SourceMetadata"' trufflehog_output.json 2>/dev/null; then
-            # Create findings file but don't log the content
-            grep '"SourceMetadata"' trufflehog_output.json > findings.json 2>/dev/null || touch findings.json
-            TOTAL_COUNT=$(wc -l < findings.json)
-            printf "Found %d secret findings\n" "$TOTAL_COUNT"
-            echo "⚠️  SECRETS DETECTED - Details will be shown when the build fails"
-          else
-            echo "No secret findings detected"
-            touch findings.json
-          fi
+          set -uo pipefail
 
-          # Clean up the raw output file immediately to prevent accidental logging
-          rm -f trufflehog_output.json
-
-      - name: Security Alert
-        if: always()
-        continue-on-error: true
-        run: |
-          # Check if we have findings directly
-          if [ -f findings.json ] && [ -s findings.json ]; then
-            TOTAL_COUNT=$(wc -l < findings.json)
-            echo "🚨 SECURITY BREACH DETECTED 🚨"
-            echo ""
-            printf "TruffleHog detected %d potential credential(s).\n" "$TOTAL_COUNT"
-            echo ""
-            
-            
-            echo "IMMEDIATE ACTION REQUIRED:"
-            echo "1. 🔄 ROTATE ALL DETECTED KEYS/SECRETS IMMEDIATELY"
-            echo "2. 🧹 Review the raw output above to identify which files contain secrets"
-            echo "3. 📝 Remove the secrets from your code and update configurations"
-            echo "4. 🔍 Look for 'file' fields in the JSON above for exact file locations"
-            echo "5. 🔍 Look for 'commit' fields to see which commits introduced the secrets"
-            echo ""
-            echo "💡 Detailed findings shown below with file paths and secret types:"
-            echo ""
-            
-            # Always show key metadata (type, file, commit), conditionally show key values
-            echo "🔑 Secret findings detected:"
-            echo "================================"
-            
-            if [ "${{ inputs.show_keys }}" == "true" ]; then
-              echo "Format: <detector-name> in <file> (Commit: <commit-hash>): <secret-value>"
-              # Display full information including key values
-              cat findings.json | jq -r '
-                if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
-                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                  "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + "): " + .Raw
-                else
-                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                  "unknown location") + ": " + .Raw
-                end
-              ' 2>/dev/null || echo "Could not parse findings for display"
-            else
-              echo "Format: <detector-name> in <file> (Commit: <commit-hash>)"
-              # Display metadata only, hide key values
-              cat findings.json | jq -r '
-                if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
-                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                  "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + ")"
-                else
-                  .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                  (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                  (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                  "unknown location")
-                end
-              ' 2>/dev/null || echo "Could not parse findings for display"
-              echo ""
-              echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
-            fi
-            echo "================================"
-            echo ""
-            echo "⚠️  Once committed to Git, consider these credentials compromised!"
-          else
+          if [ ! -s findings.json ]; then
             echo "✅ No secrets detected"
+            echo "## ✅ Secret scan: clean" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+
+          TOTAL=$(wc -l < findings.json)
+          echo "🚨 SECURITY BREACH DETECTED 🚨"
+          printf "TruffleHog detected %d potential credential(s).\n\n" "$TOTAL"
+          echo "IMMEDIATE ACTION REQUIRED:"
+          echo "1. 🔄 Rotate every detected key/secret now - once pushed, treat them as compromised"
+          echo "2. 🧹 Remove them from the code and move them to secrets management"
+          echo "3. 📝 Remember that rewriting history does not un-leak a pushed credential"
           echo ""
-          exit 1
+          echo "🔑 Findings:"
+          echo "================================"
+
+          # Location fields differ between the git and filesystem sources.
+          LOCATION='(.SourceMetadata.Data.Git.file // .SourceMetadata.Data.Filesystem.file // "unknown location")'
+          COMMIT='(.SourceMetadata.Data.Git.commit // "" | if . == "" then "" else " (Commit: " + .[0:8] + ")" end)'
+
+          if [ "$SHOW_KEYS" = "true" ]; then
+            jq -r ".DetectorName + \" in \" + $LOCATION + $COMMIT + \": \" + (.Raw // \"\")" findings.json \
+              || echo "Could not parse findings for display"
+          else
+            jq -r ".DetectorName + \" in \" + $LOCATION + $COMMIT" findings.json \
+              || echo "Could not parse findings for display"
+            echo ""
+            echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
+          fi
+          echo "================================"
+
+          {
+            echo "## 🚨 Secret scan: $TOTAL finding(s)"
+            echo ""
+            echo "Rotate the affected credentials immediately."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Security Alert to Webhook
         if: always() && inputs.notify_webhook
         continue-on-error: true
         env:
-          # Webhook URL from workflow secret
           SECURITY_WEBHOOK_URL: ${{ secrets.webhook_url }}
-          # Escape GitHub context variables
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # Check if we have findings directly
-          if [ -f findings.json ] && [ -s findings.json ]; then            
-            # Validate webhook URL format
-            if ! echo "$SECURITY_WEBHOOK_URL" | grep -qE '^https?://'; then
-              echo "❌ Invalid webhook URL format: must start with http:// or https://"
-              echo "ℹ️ Skipping webhook notification due to invalid URL format"
-              exit 0
-            fi
-            
-            echo "📡 Sending security alert to webhook..."
-            # Validate webhook URL format (already validated above, but double-check)
-            if ! echo "$SECURITY_WEBHOOK_URL" | grep -qE '^https?://'; then
-              echo "❌ Invalid webhook URL format: must start with http:// or https://"
-              exit 0
-            fi
-            
-            TOTAL_COUNT=$(wc -l < findings.json)
-            
-            # Create sanitized findings by redacting the Raw field
-            echo "Sanitizing findings to redact sensitive information..."
-            cat findings.json | jq -c '. + {"Raw": "***REDACTED***", "RawV2": "***REDACTED***"}' > sanitized_findings.json
-            
-            # Create payload with repository context and sanitized findings
-            # Use jq to properly escape all variables in JSON
-            jq -n \
-              --arg repository "$(printf %q "$GITHUB_REPOSITORY")" \
-              --arg branch "$(printf %q "$GITHUB_REF_NAME")" \
-              --arg commit "$(printf %q "$GITHUB_SHA")" \
-              --arg actor "$(printf %q "$GITHUB_ACTOR")" \
-              --arg workflow_run_url "$(printf %q "$GITHUB_SERVER_URL")/$(printf %q "$GITHUB_REPOSITORY")/actions/runs/$(printf %q "$GITHUB_RUN_ID")" \
-              --argjson secrets_count "$TOTAL_COUNT" \
-              --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --slurpfile findings sanitized_findings.json \
-              '{
-                repository: $repository,
-                branch: $branch,
-                commit: $commit,
-                actor: $actor,
-                workflow_run_url: $workflow_run_url,
-                secrets_count: $secrets_count,
-                timestamp: $timestamp,
-                findings: $findings
-              }' > webhook_payload.json
-            
-            # Send to webhook with improved error handling and security headers
-            echo "🌐 Attempting webhook request..."
-            
-            if curl -X POST \
-              -H "Content-Type: application/json" \
-              -H "User-Agent: GitHub-Actions-Security-Scanner/1.0" \
-              -d @webhook_payload.json \
-              "$SECURITY_WEBHOOK_URL" \
-              --max-time 30 \
-              --retry 2 \
-              --retry-delay 5 \
-              --fail-with-body \
-              --silent \
-              --show-error; then
-              echo "✅ Security alert sent successfully"
-            else
-              echo "❌ Failed to send security alert to webhook"
-              echo "🔍 Curl exit code: $?"
-              echo "🔍 Please verify the webhook URL is correct and accessible"
-            fi
-            
-            # Clean up sensitive payload file
-            rm -f webhook_payload.json sanitized_findings.json findings.json
-          else
+          set -uo pipefail
+
+          if [ ! -s findings.json ]; then
             echo "No secrets detected - skipping webhook notification"
-            # Clean up any remaining files even if no secrets found
-            rm -f findings.json 2>/dev/null || true
+            exit 0
           fi
 
-      - name: Handle Webhook Disabled
-        if: always() && !inputs.notify_webhook
-        run: |
-          echo "ℹ️  Webhook notifications are disabled. Set notify_webhook: true to enable them."
-          # Clean up any remaining files even if no secrets found
-          rm -f findings.json 2>/dev/null || true
+          case "${SECURITY_WEBHOOK_URL:-}" in
+            http://*|https://*) ;;
+            *) echo "ℹ️ No valid webhook URL - skipping notification"; exit 0 ;;
+          esac
 
-      - name: Fail Build After Notification
+          # Never send the secret itself to a third-party endpoint.
+          jq -c '. + {Raw: "***REDACTED***", RawV2: "***REDACTED***"}' findings.json > sanitized.json
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg branch "$GITHUB_REF_NAME" \
+            --arg commit "$GITHUB_SHA" \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg workflow_run_url "$RUN_URL" \
+            --argjson secrets_count "$(wc -l < findings.json)" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile findings sanitized.json \
+            '{repository: $repository, branch: $branch, commit: $commit, actor: $actor,
+              workflow_run_url: $workflow_run_url, secrets_count: $secrets_count,
+              timestamp: $timestamp, findings: $findings}' > payload.json
+
+          if curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: GitHub-Actions-Security-Scanner/1.0" \
+            -d @payload.json "$SECURITY_WEBHOOK_URL" \
+            --max-time 30 --retry 2 --retry-delay 5 \
+            --fail-with-body --silent --show-error; then
+            echo "✅ Security alert sent"
+          else
+            echo "❌ Failed to send security alert (exit $?)"
+          fi
+
+          rm -f payload.json sanitized.json
+
+      # Blocks the build when secrets are present. Reuses the findings the
+      # scan already produced instead of re-running TruffleHog a second time,
+      # which is what the previous "final verification" pass did.
+      - name: Fail on detected secrets
         if: always()
         run: |
-          # Source the reusable functions
-          source /tmp/trufflehog_scan.sh
-
-          # Get the default branch and current commit with proper escaping
-          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
-          CURRENT_COMMIT="${{ github.sha }}"
-          CURRENT_BRANCH="${{ github.ref_name }}"
-          BEFORE_COMMIT="${{ github.event.before }}"
-
-          # Determine scan range using the reusable function
-          SINCE_COMMIT=$(get_scan_range "$DEFAULT_BRANCH" "$CURRENT_BRANCH" "$BEFORE_COMMIT")
-
-          echo "🔍 Running final TruffleHog verification scan..."
-
-          # Get ignore keys from workflow input
-          IGNORE_KEYS="${{ inputs.ignore_keys }}"
-
-          # Run TruffleHog for final verification using the reusable function
-          run_trufflehog_scan "final_verification.json" "$SINCE_COMMIT" "$CURRENT_BRANCH" "$CURRENT_COMMIT" "$IGNORE_KEYS"
-          TRUFFLEHOG_EXIT_CODE=$?
-
-          printf "📊 Final verification scan completed with exit code: %d\n" "$TRUFFLEHOG_EXIT_CODE"
-
-          # Filter out ignored keys if any are specified
-          if [ -n "$IGNORE_KEYS" ]; then
-            echo "🔍 Applying ignore keys filter to final verification..."
-            filter_ignored_keys "final_verification.json" "filtered_final.json" "$IGNORE_KEYS"
-            mv "filtered_final.json" "final_verification.json"
+          set -uo pipefail
+          if [ -s findings.json ]; then
+            printf "🚨 FAILING BUILD: %s secret(s) detected\n" "$(wc -l < findings.json)"
+            rm -f findings.json
+            exit 1
           fi
-
-          # Check if we have findings (without logging the actual content)
-          if [ -s final_verification.json ]; then
-            # Filter out log messages, keep only actual findings
-            if grep -q '"SourceMetadata"' final_verification.json 2>/dev/null; then
-              grep '"SourceMetadata"' final_verification.json > final_findings.json 2>/dev/null || touch final_findings.json
-              TOTAL_COUNT=$(wc -l < final_findings.json)
-              echo "🚨 FINAL VERIFICATION: SECRETS DETECTED 🚨"
-              printf "TruffleHog found %d potential credential(s) in final verification.\n" "$TOTAL_COUNT"
-              echo ""
-              
-              # Show detailed findings with key metadata (type, file, commit), conditionally show key values
-              echo "🔑 Secret findings detected:"
-              echo "================================"
-              
-              if [ "${{ inputs.show_keys }}" == "true" ]; then
-                echo "Format: <detector-name> in <file> (Commit: <commit-hash>): <secret-value>"
-                # Display full information including key values
-                cat final_findings.json | jq -r '
-                  if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
-                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                    "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + "): " + .Raw
-                  else
-                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                    "unknown location") + ": " + .Raw
-                  end
-                ' 2>/dev/null || echo "Could not parse findings for display"
-              else
-                echo "Format: <detector-name> in <file> (Commit: <commit-hash>)"
-                # Display metadata only, hide key values
-                cat final_findings.json | jq -r '
-                  if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then
-                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                    "unknown location") + " (Commit: " + (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) + ")"
-                  else
-                    .DetectorName + " in " + ((.SourceMetadata.Git.File // .SourceMetadata.Data.Filesystem.File // .SourceMetadata.Data.Git.File // .SourceMetadata.Data.Git.file // .file) // 
-                    (if .SourceMetadata.Git.Repository then "repository: " + .SourceMetadata.Git.Repository else null end) //
-                    (if (.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit) then "commit: " + ((.SourceMetadata.Git.Commit // .SourceMetadata.Data.Git.commit)[0:8]) else null end) //
-                    "unknown location")
-                  end
-                ' 2>/dev/null || echo "Could not parse findings for display"
-                echo ""
-                echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
-              fi
-              echo "================================"
-              echo ""
-              echo "🚨 FAILING BUILD DUE TO DETECTED SECRETS 🚨"
-              
-              # Clean up sensitive files before exiting
-              rm -f final_verification.json final_findings.json 2>/dev/null || true
-              exit 1
-            fi
-          fi
-
-          echo "✅ Final verification: No secrets detected - build can proceed"
-          # Clean up verification files
-          rm -f final_verification.json final_findings.json 2>/dev/null || true
-
-          # Final cleanup of any remaining sensitive files
-          rm -f trufflehog_output.json findings.json sanitized_findings.json webhook_payload.json 2>/dev/null || true
+          rm -f findings.json
+          echo "✅ No secrets detected - build can proceed"
 
   security-gate:
     name: Security Gate
     runs-on: ubuntu-latest
     needs: [validate-inputs, secret-scan]
     if: always()
-
-    # Set minimal permissions for this job
     permissions:
       contents: read
-
     steps:
-      - name: Check secret scan result
+      - name: Check scan results
         env:
           SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          VALIDATE_RESULT: ${{ needs.validate-inputs.result }}
         run: |
-          # Check if the secret-scan job failed (which means secrets were found)
-
-          if [ "$(printf %q "$SECRET_SCAN_RESULT")" == "failure" ]; then
-            echo "❌ Build blocked due to detected secrets"
+          if [ "$VALIDATE_RESULT" = "failure" ]; then
+            echo "❌ Build blocked: input validation failed"
             exit 1
-          else
-            echo "✅ No secrets detected - Build is secure"
           fi
+
+          if [ "$SECRET_SCAN_RESULT" != "success" ]; then
+            echo "❌ Build blocked: secret scan result was '$SECRET_SCAN_RESULT'"
+            echo "   (a failed or errored scan blocks too - an unrun scan is not a pass)"
+            exit 1
+          fi
+
+          echo "✅ No secrets detected - build is secure"
