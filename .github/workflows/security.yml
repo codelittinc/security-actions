@@ -1,10 +1,14 @@
-# Secret scanning. Unlike the dependency scan, this one DOES block:
-# a committed credential is a live incident, not an advisory.
+# Secret scanning. Unlike the dependency scan, this one DOES block - but only
+# on secrets the pushed commits actually introduce. A newly committed
+# credential is a live incident; a string already sitting in the codebase is
+# not something the next PR can fix, and rotating the key does not remove it
+# from the file. Blocking on those would wedge every future PR.
 #
-# Two scans run per invocation:
-#   1. git history for the range being pushed (catches newly added secrets)
-#   2. the checked-out working tree (catches secrets already sitting in the
-#      code from earlier commits, which a range scan alone never sees)
+#   scan 1 (always)  git history for the range being pushed  -> BLOCKS
+#   scan 2 (opt-in)  the checked-out working tree            -> ADVISORY ONLY
+#
+# Enable scan 2 with scan_filesystem: true for visibility into pre-existing
+# secrets without gating merges on them.
 name: Reusable Security Scan
 
 env:
@@ -29,9 +33,14 @@ on:
         default: ""
         type: string
       scan_filesystem:
-        description: "Also scan the checked-out working tree, not just the pushed commit range"
+        description: >-
+          Additionally scan the whole working tree for pre-existing secrets.
+          These findings are ADVISORY ONLY and never fail the build - a secret
+          already in the codebase cannot be fixed by the PR that trips over it,
+          and once rotated the string usually still sits in the file. Only
+          secrets introduced by the commits being pushed block.
         required: false
-        default: true
+        default: false
         type: boolean
     secrets:
       webhook_url:
@@ -178,29 +187,47 @@ jobs:
         run: |
           set -uo pipefail
 
-          # The two scans overlap, so the same secret appears twice. Key on
-          # detector + raw value only: the git source reports "src/config.ts"
-          # while the filesystem source reports "./src/config.ts", so keying
-          # on the path as well would fail to collapse the duplicate.
-          jq -sc 'unique_by([.DetectorName, .Raw]) | .[]' all_findings.json > deduped.json 2>/dev/null \
-            || cp all_findings.json deduped.json
+          # Split by source before anything else. Git-source findings come
+          # from the commits being pushed and are the only ones that block.
+          # Filesystem-source findings are pre-existing content: the PR that
+          # trips over them did not introduce them and usually cannot remove
+          # them, and after a key is rotated the old string is still sitting
+          # in the file - so blocking on those would wedge every future PR.
+          jq -c 'select(.SourceMetadata.Data.Git != null)'  all_findings.json > git_raw.json 2>/dev/null || : > git_raw.json
+          jq -c 'select(.SourceMetadata.Data.Git == null)'  all_findings.json > fs_raw.json  2>/dev/null || : > fs_raw.json
 
-          if [ -n "$IGNORE_KEYS" ]; then
-            echo "🚫 Applying ignore list"
-            # Drop any finding whose raw value contains an ignored key
-            # (case-insensitive), matching the previous behaviour.
-            jq -c --arg keys "$IGNORE_KEYS" '
-              ($keys | split(",") | map(ascii_downcase | gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $ignore
-              | select([ $ignore[] as $k | ((.Raw // "") | ascii_downcase | contains($k)) ] | any | not)
-            ' deduped.json > findings.json 2>/dev/null || cp deduped.json findings.json
-            echo "🚫 Ignored $(( $(wc -l < deduped.json) - $(wc -l < findings.json) )) finding(s)"
+          # Drop findings whose raw value contains an ignored key (case-insensitive).
+          apply_filters() {
+            IN="$1"; OUT="$2"
+            jq -sc 'unique_by([.DetectorName, .Raw]) | .[]' "$IN" > "$OUT.dedup" 2>/dev/null || cp "$IN" "$OUT.dedup"
+            if [ -n "$IGNORE_KEYS" ]; then
+              jq -c --arg keys "$IGNORE_KEYS" '
+                ($keys | split(",") | map(ascii_downcase | gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $ignore
+                | select([ $ignore[] as $k | ((.Raw // "") | ascii_downcase | contains($k)) ] | any | not)
+              ' "$OUT.dedup" > "$OUT" 2>/dev/null || cp "$OUT.dedup" "$OUT"
+            else
+              cp "$OUT.dedup" "$OUT"
+            fi
+            rm -f "$OUT.dedup"
+          }
+
+          apply_filters git_raw.json blocking.json
+          apply_filters fs_raw.json advisory_all.json
+
+          # A secret found by both scans was introduced by this push, so it is
+          # already in blocking.json - do not also report it as advisory.
+          if [ -s blocking.json ] && [ -s advisory_all.json ]; then
+            jq -sc --slurpfile blocking blocking.json '
+              ($blocking | map([.DetectorName, .Raw])) as $seen
+              | map(select(([.DetectorName, .Raw] | IN($seen[])) | not)) | .[]
+            ' advisory_all.json > advisory.json 2>/dev/null || cp advisory_all.json advisory.json
           else
-            cp deduped.json findings.json
+            cp advisory_all.json advisory.json
           fi
 
-          rm -f all_findings.json deduped.json
-          echo "COUNT=$(wc -l < findings.json)" >> "$GITHUB_ENV"
-          printf "📊 Findings after filtering: %s\n" "$(wc -l < findings.json)"
+          rm -f all_findings.json git_raw.json fs_raw.json advisory_all.json
+          printf "📊 Blocking findings (new commits): %s\n" "$(wc -l < blocking.json)"
+          printf "📊 Advisory findings (pre-existing): %s\n" "$(wc -l < advisory.json)"
 
       - name: Report findings
         if: always()
@@ -209,42 +236,68 @@ jobs:
         run: |
           set -uo pipefail
 
-          if [ ! -s findings.json ]; then
-            echo "✅ No secrets detected"
-            echo "## ✅ Secret scan: clean" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          TOTAL=$(wc -l < findings.json)
-          echo "🚨 SECURITY BREACH DETECTED 🚨"
-          printf "TruffleHog detected %d potential credential(s).\n\n" "$TOTAL"
-          echo "IMMEDIATE ACTION REQUIRED:"
-          echo "1. 🔄 Rotate every detected key/secret now - once pushed, treat them as compromised"
-          echo "2. 🧹 Remove them from the code and move them to secrets management"
-          echo "3. 📝 Remember that rewriting history does not un-leak a pushed credential"
-          echo ""
-          echo "🔑 Findings:"
-          echo "================================"
-
           # Location fields differ between the git and filesystem sources.
           LOCATION='(.SourceMetadata.Data.Git.file // .SourceMetadata.Data.Filesystem.file // "unknown location")'
           COMMIT='(.SourceMetadata.Data.Git.commit // "" | if . == "" then "" else " (Commit: " + .[0:8] + ")" end)'
 
-          if [ "$SHOW_KEYS" = "true" ]; then
-            jq -r ".DetectorName + \" in \" + $LOCATION + $COMMIT + \": \" + (.Raw // \"\")" findings.json \
-              || echo "Could not parse findings for display"
+          render() {
+            if [ "$SHOW_KEYS" = "true" ]; then
+              jq -r ".DetectorName + \" in \" + $LOCATION + $COMMIT + \": \" + (.Raw // \"\")" "$1" \
+                || echo "Could not parse findings for display"
+            else
+              jq -r ".DetectorName + \" in \" + $LOCATION + $COMMIT" "$1" \
+                || echo "Could not parse findings for display"
+            fi
+          }
+
+          BLOCKING=$(wc -l < blocking.json)
+          ADVISORY=$(wc -l < advisory.json)
+
+          if [ "$BLOCKING" -gt 0 ]; then
+            echo "🚨 SECRETS INTRODUCED BY THIS PUSH 🚨"
+            printf "TruffleHog detected %d new credential(s).\n\n" "$BLOCKING"
+            echo "IMMEDIATE ACTION REQUIRED:"
+            echo "1. 🔄 Rotate every detected key/secret now - once pushed, treat them as compromised"
+            echo "2. 🧹 Remove them from the code and move them to secrets management"
+            echo "3. 📝 Remember that rewriting history does not un-leak a pushed credential"
+            echo ""
+            echo "🔑 New findings (these block the build):"
+            echo "================================"
+            render blocking.json
+            echo "================================"
           else
-            jq -r ".DetectorName + \" in \" + $LOCATION + $COMMIT" findings.json \
-              || echo "Could not parse findings for display"
+            echo "✅ No new secrets introduced by this push"
+          fi
+
+          if [ "$ADVISORY" -gt 0 ]; then
+            echo ""
+            printf "ℹ️  %d pre-existing finding(s) elsewhere in the working tree.\n" "$ADVISORY"
+            echo "   These do NOT block the build - this push did not introduce them."
+            echo "   If already rotated, the leftover string can be cleaned up separately,"
+            echo "   or added to ignore_keys."
+            echo "--------------------------------"
+            render advisory.json
+            echo "--------------------------------"
+            echo "::warning title=Pre-existing secrets::$ADVISORY finding(s) already in the working tree. Not introduced by this push, so not blocking."
+          fi
+
+          if [ "$SHOW_KEYS" != "true" ] && { [ "$BLOCKING" -gt 0 ] || [ "$ADVISORY" -gt 0 ]; }; then
             echo ""
             echo "ℹ️  Key values are hidden. Set show_keys: true to display them."
           fi
-          echo "================================"
 
           {
-            echo "## 🚨 Secret scan: $TOTAL finding(s)"
-            echo ""
-            echo "Rotate the affected credentials immediately."
+            if [ "$BLOCKING" -gt 0 ]; then
+              echo "## 🚨 Secret scan: $BLOCKING new finding(s)"
+              echo ""
+              echo "Introduced by this push. Rotate the affected credentials immediately."
+            else
+              echo "## ✅ Secret scan: no new secrets"
+            fi
+            if [ "$ADVISORY" -gt 0 ]; then
+              echo ""
+              echo "_Plus $ADVISORY pre-existing finding(s) in the working tree (advisory, not blocking)._"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Security Alert to Webhook
@@ -260,8 +313,10 @@ jobs:
         run: |
           set -uo pipefail
 
-          if [ ! -s findings.json ]; then
-            echo "No secrets detected - skipping webhook notification"
+          # Only alert on secrets this push introduced. Paging on
+          # pre-existing findings would re-fire on every single build.
+          if [ ! -s blocking.json ]; then
+            echo "No new secrets detected - skipping webhook notification"
             exit 0
           fi
 
@@ -271,7 +326,7 @@ jobs:
           esac
 
           # Never send the secret itself to a third-party endpoint.
-          jq -c '. + {Raw: "***REDACTED***", RawV2: "***REDACTED***"}' findings.json > sanitized.json
+          jq -c '. + {Raw: "***REDACTED***", RawV2: "***REDACTED***"}' blocking.json > sanitized.json
 
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -279,7 +334,7 @@ jobs:
             --arg commit "$GITHUB_SHA" \
             --arg actor "$GITHUB_ACTOR" \
             --arg workflow_run_url "$RUN_URL" \
-            --argjson secrets_count "$(wc -l < findings.json)" \
+            --argjson secrets_count "$(wc -l < blocking.json)" \
             --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --slurpfile findings sanitized.json \
             '{repository: $repository, branch: $branch, commit: $commit, actor: $actor,
@@ -299,20 +354,22 @@ jobs:
 
           rm -f payload.json sanitized.json
 
-      # Blocks the build when secrets are present. Reuses the findings the
-      # scan already produced instead of re-running TruffleHog a second time,
-      # which is what the previous "final verification" pass did.
-      - name: Fail on detected secrets
+      # Blocks only on secrets introduced by the commits being pushed.
+      # Pre-existing findings are advisory: a PR cannot fix a secret it did
+      # not add, and a rotated key usually leaves its old string in the file,
+      # so blocking on those would wedge every future PR forever.
+      # Reuses the findings already computed rather than re-scanning.
+      - name: Fail on new secrets
         if: always()
         run: |
           set -uo pipefail
-          if [ -s findings.json ]; then
-            printf "🚨 FAILING BUILD: %s secret(s) detected\n" "$(wc -l < findings.json)"
-            rm -f findings.json
+          COUNT=$(wc -l < blocking.json 2>/dev/null || echo 0)
+          rm -f blocking.json advisory.json
+          if [ "$COUNT" -gt 0 ]; then
+            printf "🚨 FAILING BUILD: %s secret(s) introduced by this push\n" "$COUNT"
             exit 1
           fi
-          rm -f findings.json
-          echo "✅ No secrets detected - build can proceed"
+          echo "✅ No new secrets - build can proceed"
 
   security-gate:
     name: Security Gate

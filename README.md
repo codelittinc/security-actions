@@ -41,6 +41,7 @@ jobs:
 | `show_keys`      | boolean | No       | `false` | Whether to show the actual keys found in logs |
 | `notify_webhook` | boolean | No       | `true`  | Whether to send webhook notifications         |
 | `ignore_keys`    | string  | No       | `""`    | Comma-separated list of keys to ignore        |
+| `scan_filesystem` | boolean | No      | `false` | Also scan the whole working tree. **Advisory only — never blocks** |
 
 ### Ignoring False Positive Keys
 
@@ -105,11 +106,28 @@ jobs:
 
 ## How It Works
 
-1. **Scanning**: TruffleHog scans your repository for secrets and sensitive data
-2. **Filtering**: If `ignore_keys` is specified, the workflow filters out findings containing those keys
-3. **Reporting**: Results are processed and reported with appropriate security alerts
-4. **Notification**: Webhook notifications are sent if enabled
-5. **Security Gate**: The workflow fails if any non-ignored secrets are detected
+1. **Scanning**: TruffleHog scans the commits being pushed (on a feature branch,
+   every commit not yet in the default branch). With `scan_filesystem: true` it
+   additionally scans the whole working tree.
+2. **Splitting**: Findings are separated by origin. Secrets introduced by the
+   pushed commits **block**. Secrets merely present in the working tree are
+   **advisory** and never fail the build.
+3. **Filtering**: If `ignore_keys` is specified, matching findings are dropped
+   from both sets, and duplicates across the two scans are collapsed.
+4. **Reporting**: Blocking and advisory findings are reported separately, with a
+   job summary. Key values are hidden unless `show_keys: true`.
+5. **Notification**: Webhook alerts fire only for newly introduced secrets, so a
+   pre-existing finding does not re-page on every build.
+6. **Security Gate**: The build fails only if the push introduced a secret. A
+   scan that errors or never ran also blocks — an unrun scan is not a pass.
+
+### Why pre-existing secrets do not block
+
+A secret already committed cannot be fixed by whichever PR happens to trip over
+it, and rotating the credential does not remove the old string from the file. If
+those blocked, every future PR would be stuck until someone rewrote history. The
+correct response is to rotate the key, then clean up the string (or add it to
+`ignore_keys`) as its own piece of work.
 
 ## Security Considerations
 
