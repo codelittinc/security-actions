@@ -154,47 +154,32 @@ jobs:
       fail_on_cvss: "7"
       enable_retired: true
       audit_level: "moderate"
-      continue_on_error: false
-      allowed_outdated_libraries: "@hapi/address,react-router-dom,tabbable"
+      run_owasp: true
 ```
+
+> **This workflow is reporting-only — it never fails the build.** Vulnerabilities
+> are surfaced as warning annotations and a job summary table so they can be
+> reviewed. Secret scanning (`security.yml`) still blocks.
 
 ### Node.js Security Configuration Options
 
 | Parameter                    | Type    | Required | Default          | Description                                              |
 | ---------------------------- | ------- | -------- | ---------------- | -------------------------------------------------------- |
-| `project_name`               | string  | No       | `"node-project"` | Project name for OWASP Dependency Check                  |
-| `node_version`               | string  | No       | `"18"`           | Node.js version to use                                   |
-| `fail_on_cvss`               | string  | No       | `"7"`            | CVSS score threshold to fail the build                   |
-| `enable_retired`             | boolean | No       | `true`           | Enable retired CVE checks                                |
-| `audit_level`                | string  | No       | `"moderate"`     | npm audit level threshold                                |
-| `continue_on_error`          | boolean | No       | `false`          | Continue workflow execution even if security checks fail |
-| `allowed_outdated_libraries` | string  | No       | `""`             | Comma-separated list of libraries allowed to be outdated |
+| `project_name`      | string  | No       | `"node-project"` | Project name for OWASP Dependency Check                                       |
+| `node_version`      | string  | No       | `"18"`           | Node.js version to use                                                        |
+| `fail_on_cvss`      | string  | No       | `"7"`            | CVSS threshold passed to OWASP. Reporting only — does not fail the build      |
+| `enable_retired`    | boolean | No       | `true`           | Enable retired CVE checks                                                     |
+| `audit_level`       | string  | No       | `"moderate"`     | Threshold passed to `npm audit`. Reporting only — does not fail the build     |
+| `run_owasp`         | boolean | No       | `true`           | Run the OWASP job. It is slow; `npm audit` alone covers most npm cases        |
+| `continue_on_error` | boolean | No       | `false`          | **Deprecated and ignored.** Nothing fails, so there is nothing to continue past |
 
-### Allowing Outdated Libraries
-
-The `allowed_outdated_libraries` parameter allows you to specify libraries that are intentionally kept at older versions. This is useful when:
-
-- You need to maintain compatibility with specific versions
-- Breaking changes in newer versions would require significant refactoring
-- The library is deprecated but still functional for your use case
-- You're planning a migration but need time to complete it
-
-#### Example: Allow Specific Libraries to Be Outdated
-
-```yaml
-jobs:
-  security-scan:
-    uses: ./.github/workflows/node-security-dependency-scan.yml
-    with:
-      allowed_outdated_libraries: "@hapi/address,react-router-dom,tabbable"
-```
-
-**Note**: Only the specified libraries will be allowed to be outdated. Any other outdated dependencies will still cause the build to fail, ensuring security while providing flexibility for specific cases.
+The `npm-audit` and `owasp-dependency-check` jobs run in parallel, so the slow
+OWASP pass no longer delays npm audit feedback.
 
 ## Requirements
 
 - GitHub Actions
-- A webhook URL for notifications (required secret)
+- A webhook URL for notifications (optional — only needed when `notify_webhook` is true)
 - TruffleHog will be automatically installed during execution
 
 ## Contributing

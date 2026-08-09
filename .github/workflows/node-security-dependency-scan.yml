@@ -1,6 +1,9 @@
 # Reporting-only workflow: it surfaces dependency vulnerabilities as
 # annotations and a job summary, but never fails the build. Findings are
 # meant to be reviewed, not to block PRs.
+#
+# npm-audit and owasp-dependency-check run as separate jobs so the slow
+# OWASP/NVD pass does not hold up the fast npm audit feedback.
 name: Node.js Security Vulnerability Scanning
 
 on:
@@ -31,22 +34,26 @@ on:
         required: false
         default: "moderate"
         type: string
+      run_owasp:
+        description: "Run the OWASP Dependency Check job. It is slow (NVD download); npm audit alone covers most npm cases."
+        required: false
+        default: true
+        type: boolean
       continue_on_error:
         description: "Deprecated and ignored. This workflow no longer fails the build, so there is nothing to continue past. Kept so existing callers stay valid."
         required: false
         default: false
         type: boolean
 
-# Minimal permissions for security scanning
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  security-scan:
-    name: Node.js Security Scan
+  npm-audit:
+    name: npm audit
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -60,31 +67,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Reporting only - this scan never fails the build. See "Report
-      # vulnerabilities" below, which surfaces findings as annotations.
       - name: Run npm audit
         run: npm audit --audit-level=${{ inputs.audit_level }}
         continue-on-error: true
-
-      - name: Run OWASP Dependency Check
-        uses: dependency-check/Dependency-Check_Action@main
-        with:
-          project: ${{ inputs.project_name }}
-          path: "."
-          format: "HTML"
-          out: "reports"
-          args: >
-            --failOnCVSS ${{ inputs.fail_on_cvss }}
-            --enableRetired ${{ inputs.enable_retired }}
-        continue-on-error: true
-
-      - name: Upload OWASP report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: owasp-dependency-check-report
-          path: reports/
-          retention-days: 30
 
       - name: Report vulnerabilities
         if: always()
@@ -139,4 +124,67 @@ jobs:
           fi
 
           # Reporting only - always succeed.
+          exit 0
+
+      # Verifies packages against npm's signed registry attestations, which
+      # catches tampering/typosquat republishing that a CVE feed cannot.
+      - name: Verify package provenance
+        if: always()
+        continue-on-error: true
+        run: |
+          OUT=$(npm audit signatures 2>&1) || true
+          echo "$OUT"
+          if echo "$OUT" | grep -qiE "invalid|missing.*signature"; then
+            echo "::warning title=Package provenance::npm audit signatures reported invalid or missing signatures - see log."
+          fi
+
+  owasp-dependency-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_owasp }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Pinned to a SHA rather than @main. This is a third-party Docker
+      # action running inside our security pipeline; a mutable ref there is
+      # exactly the supply-chain exposure this workflow exists to catch.
+      #
+      # Note: the action invokes dependency-check with --noupdate, so the CVE
+      # database is whatever was baked into its image - it does not fetch the
+      # current NVD feed at runtime. Treat its output as a secondary signal;
+      # npm audit is the authoritative source for npm packages.
+      - name: Run OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@75ba02d6183445fe0761d26e836bde58b1560600 # 1.1.0
+        continue-on-error: true
+        with:
+          project: ${{ inputs.project_name }}
+          path: "."
+          format: "HTML"
+          out: "reports"
+          args: >
+            --failOnCVSS ${{ inputs.fail_on_cvss }}
+            --enableRetired ${{ inputs.enable_retired }}
+
+      - name: Upload OWASP report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: owasp-dependency-check-report
+          path: reports/
+          retention-days: 30
+
+      - name: Report OWASP result
+        if: always()
+        run: |
+          if [ -d reports ] && [ -n "$(ls -A reports 2>/dev/null)" ]; then
+            echo "::warning title=OWASP Dependency Check::Report generated - download the 'owasp-dependency-check-report' artifact to review findings."
+            echo "## OWASP Dependency Check" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Report available as the \`owasp-dependency-check-report\` artifact." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=OWASP Dependency Check::No report was produced - the scan may not have completed."
+          fi
           exit 0
