@@ -3,14 +3,20 @@
 # consuming repo. This runs them on this repo instead, and lints the workflow
 # files, so a broken change is caught here rather than downstream.
 #
-# Runs on pull_request as well as pushes to main: catching a problem before
-# the merge is the point, since consumers pick up `@main` immediately.
+# Runs on every branch, not just main. Consumers pick up `@main` the instant
+# it lands, so a signal that only arrives after merge is already too late.
+#
+# The jobs below reference the workflows by local path (`./.github/...`)
+# rather than `@main`. That is deliberate and is what makes this test the
+# *current* version: GitHub resolves a local reusable-workflow reference
+# against the same commit as the caller, so a push to any branch exercises
+# that branch's copy. Using `@main` here would test the already-merged
+# version and defeat the point.
 name: Self Scan
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: ["**"]
 
 permissions:
   contents: read
