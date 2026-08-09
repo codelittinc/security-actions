@@ -1,0 +1,75 @@
+# This repository ships reusable workflows, so nothing here ran against
+# itself - changes were only exercised once they had already landed in every
+# consuming repo. This runs them on this repo instead, and lints the workflow
+# files, so a broken change is caught here rather than downstream.
+#
+# Runs on pull_request as well as pushes to main: catching a problem before
+# the merge is the point, since consumers pick up `@main` immediately.
+name: Self Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT_VERSION: "1.7.12"
+
+jobs:
+  # Dogfood the secret scanner on this repository.
+  #
+  # notify_webhook is off: this repo has no SECURITY_WEBHOOK_URL secret, and
+  # validate-inputs correctly fails when notifications are on without one.
+  #
+  # node-security-dependency-scan.yml is deliberately NOT called here - it
+  # runs `npm ci`, and this repository has no package.json, so it would fail
+  # for reasons that say nothing about whether the workflow is correct.
+  secret-scan:
+    uses: ./.github/workflows/security.yml
+    with:
+      notify_webhook: false
+      scan_filesystem: true
+      show_keys: false
+
+  # Catches invalid workflow syntax, bad expressions, unknown contexts, and -
+  # via shellcheck - bugs in the inline `run:` scripts, which is where the
+  # real logic in this repo lives.
+  lint-workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+
+          BINARY="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          CHECKSUMS="actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          BASE="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+
+          curl -sSfL -o "$BINARY" "${BASE}/${BINARY}"
+          curl -sSfL -o "$CHECKSUMS" "${BASE}/${CHECKSUMS}"
+
+          # Verified rather than trusted, and installed from a pinned release
+          # instead of a third-party action, matching how TruffleHog is
+          # installed in security.yml.
+          grep " ${BINARY}\$" "$CHECKSUMS" | sha256sum -c -
+
+          tar -xzf "$BINARY" actionlint
+          sudo install -m 755 actionlint /usr/local/bin/actionlint
+          cd / && rm -rf "$TEMP_DIR"
+
+          actionlint --version
+
+      - name: Run actionlint
+        run: actionlint -color

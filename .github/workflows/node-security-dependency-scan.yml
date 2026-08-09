@@ -181,9 +181,11 @@ jobs:
         run: |
           if [ -d reports ] && [ -n "$(ls -A reports 2>/dev/null)" ]; then
             echo "::warning title=OWASP Dependency Check::Report generated - download the 'owasp-dependency-check-report' artifact to review findings."
-            echo "## OWASP Dependency Check" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Report available as the \`owasp-dependency-check-report\` artifact." >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## OWASP Dependency Check"
+              echo ""
+              echo "Report available as the \`owasp-dependency-check-report\` artifact."
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning title=OWASP Dependency Check::No report was produced - the scan may not have completed."
           fi
