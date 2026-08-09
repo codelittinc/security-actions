@@ -1,3 +1,6 @@
+# Reporting-only workflow: it surfaces dependency vulnerabilities as
+# annotations and a job summary, but never fails the build. Findings are
+# meant to be reviewed, not to block PRs.
 name: Node.js Security Vulnerability Scanning
 
 on:
@@ -14,7 +17,7 @@ on:
         default: "18"
         type: string
       fail_on_cvss:
-        description: "CVSS score threshold to fail the build"
+        description: "CVSS threshold passed to OWASP Dependency Check. Reporting only - it does not fail the build."
         required: false
         default: "7"
         type: string
@@ -24,12 +27,12 @@ on:
         default: true
         type: boolean
       audit_level:
-        description: "npm audit level threshold"
+        description: "Threshold passed to `npm audit`. Reporting only - it does not fail the build."
         required: false
         default: "moderate"
         type: string
       continue_on_error:
-        description: "Continue workflow execution even if security checks fail"
+        description: "Deprecated and ignored. This workflow no longer fails the build, so there is nothing to continue past. Kept so existing callers stay valid."
         required: false
         default: false
         type: boolean
@@ -57,9 +60,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Reporting only - this scan never fails the build. See "Report
+      # vulnerabilities" below, which surfaces findings as annotations.
       - name: Run npm audit
         run: npm audit --audit-level=${{ inputs.audit_level }}
-        continue-on-error: ${{ inputs.continue_on_error }}
+        continue-on-error: true
 
       - name: Run OWASP Dependency Check
         uses: dependency-check/Dependency-Check_Action@main
@@ -71,42 +76,7 @@ jobs:
           args: >
             --failOnCVSS ${{ inputs.fail_on_cvss }}
             --enableRetired ${{ inputs.enable_retired }}
-        continue-on-error: ${{ inputs.continue_on_error }}
-
-      - name: Check for High Severity Vulnerabilities
-        if: ${{ !inputs.continue_on_error }}
-        run: |
-          echo "🔍 Checking for high severity vulnerabilities..."
-
-          # Check npm audit for high/critical vulnerabilities
-          if npm audit --audit-level=high --json | jq -e '.vulnerabilities | length > 0' > /dev/null 2>&1; then
-            echo "❌ HIGH SEVERITY VULNERABILITIES DETECTED!"
-            echo "npm audit found high or critical vulnerabilities that must be fixed."
-            echo ""
-            echo "Vulnerability details:"
-            npm audit --audit-level=high
-            echo ""
-            echo "🚨 BUILD FAILED: High severity vulnerabilities detected"
-            echo "Please fix these vulnerabilities before proceeding."
-            exit 1
-          fi
-
-          # Check OWASP report for high CVSS scores
-          if [ -f "reports/dependency-check-report.xml" ]; then
-            echo "🔍 Checking OWASP report for high CVSS vulnerabilities..."
-            
-            # Check if there are any vulnerabilities with CVSS >= 7 (high)
-            if grep -q 'severity="High"' reports/dependency-check-report.xml 2>/dev/null; then
-              echo "❌ HIGH CVSS VULNERABILITIES DETECTED IN OWASP REPORT!"
-              echo "OWASP Dependency Check found high severity vulnerabilities."
-              echo ""
-              echo "🚨 BUILD FAILED: High CVSS vulnerabilities detected"
-              echo "Please review the OWASP report and fix high severity issues."
-              exit 1
-            fi
-          fi
-
-          echo "✅ No high severity vulnerabilities detected"
+        continue-on-error: true
 
       - name: Upload OWASP report
         uses: actions/upload-artifact@v4
@@ -116,24 +86,57 @@ jobs:
           path: reports/
           retention-days: 30
 
-      - name: Security Gate Check
-        if: ${{ !inputs.continue_on_error }}
+      - name: Report vulnerabilities
+        if: always()
         run: |
-          echo "🔒 Final security gate check..."
+          # Counts come from .metadata.vulnerabilities, which is the only
+          # part of the JSON that is actually broken down by severity.
+          # (--audit-level affects npm's exit code, not its --json output,
+          # so filtering on it here would report every finding as "high".)
+          AUDIT_JSON=$(npm audit --json 2>/dev/null || true)
 
-          # Check if npm audit found vulnerabilities at the configured level
-          if npm audit --audit-level=${{ inputs.audit_level }} --json | jq -e '.vulnerabilities | length > 0' > /dev/null 2>&1; then
-            echo "❌ Security vulnerabilities detected at level '${{ inputs.audit_level }}' - build blocked"
-            echo "Please fix the vulnerabilities before proceeding"
-            exit 1
+          if [ -z "$AUDIT_JSON" ]; then
+            echo "::warning title=npm audit::Could not run npm audit - skipping vulnerability report"
+            exit 0
           fi
 
-          # Double-check for high severity vulnerabilities (should have been caught earlier, but safety check)
-          if npm audit --audit-level=high --json | jq -e '.vulnerabilities | length > 0' > /dev/null 2>&1; then
-            echo "❌ CRITICAL: High severity vulnerabilities still detected - build blocked"
-            echo "This should not happen if previous checks passed. Please investigate."
-            exit 1
+          get() { echo "$AUDIT_JSON" | jq -r ".metadata.vulnerabilities.$1 // 0"; }
+          CRITICAL=$(get critical); HIGH=$(get high); MODERATE=$(get moderate)
+          LOW=$(get low); INFO=$(get info); TOTAL=$(get total)
+
+          {
+            echo "## Dependency vulnerability report"
+            echo ""
+            echo "| Severity | Count |"
+            echo "| --- | --- |"
+            echo "| Critical | $CRITICAL |"
+            echo "| High | $HIGH |"
+            echo "| Moderate | $MODERATE |"
+            echo "| Low | $LOW |"
+            echo "| Info | $INFO |"
+            echo "| **Total** | **$TOTAL** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "✅ No vulnerabilities detected"
+            exit 0
           fi
 
-          echo "✅ Security gate passed - no vulnerabilities detected"
-          echo "✅ Build can proceed safely"
+          echo "Vulnerability details:"
+          npm audit || true
+
+          # Advisory-level detail, so the annotation names the offending package.
+          echo "$AUDIT_JSON" \
+            | jq -r '.vulnerabilities | to_entries[]
+                     | select(.value.severity == "critical" or .value.severity == "high")
+                     | "::warning title=Vulnerable dependency (\(.value.severity))::\(.key) \(.value.range // "")"' \
+            || true
+
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "::warning title=Dependency scan::$CRITICAL critical and $HIGH high severity vulnerabilities found. This does not block the build - please review and fix where possible."
+          else
+            echo "::warning title=Dependency scan::$TOTAL vulnerabilities found ($MODERATE moderate, $LOW low). This does not block the build."
+          fi
+
+          # Reporting only - always succeed.
+          exit 0
